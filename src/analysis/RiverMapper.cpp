@@ -133,42 +133,85 @@ void RiverMapper::findDepressions(const Heightmap& terrain,
 
     lakeMap.fill(0.0f);
 
-    // Find local minima (cells lower than all neighbors)
-    #ifdef WORLDGEN_USE_OPENMP
-    #pragma omp parallel for schedule(static)
-    #endif
-    for (size_t y = 1; y < h - 1; ++y) {
-        for (size_t x = 1; x < w - 1; ++x) {
+    // Use priority-flood algorithm to find depressions
+    // Start from edges and flood inward, marking cells that would be underwater
+
+    // Track which cells have been processed
+    std::vector<bool> processed(w * h, false);
+
+    // Track the "filled" height - water surface level at each cell
+    std::vector<float> filledHeight(w * h);
+    for (size_t i = 0; i < w * h; ++i) {
+        filledHeight[i] = data[i];
+    }
+
+    // Priority queue: process lowest cells first
+    // pair<height, index>
+    auto cmp = [](const std::pair<float, size_t>& a, const std::pair<float, size_t>& b) {
+        return a.first > b.first;  // Min-heap
+    };
+    std::priority_queue<std::pair<float, size_t>,
+                        std::vector<std::pair<float, size_t>>,
+                        decltype(cmp)> pq(cmp);
+
+    // Initialize with boundary cells (edges and ocean cells)
+    for (size_t y = 0; y < h; ++y) {
+        for (size_t x = 0; x < w; ++x) {
             size_t idx = y * w + x;
-            float center = data[idx];
 
-            if (center < m_config.seaLevel) continue;  // Skip ocean
+            // Add boundary cells and ocean cells to queue
+            bool isBoundary = (x == 0 || x == w - 1 || y == 0 || y == h - 1);
+            bool isOcean = data[idx] < m_config.seaLevel;
 
-            bool isMin = true;
-            float minNeighbor = center;
+            if (isBoundary || isOcean) {
+                pq.push({data[idx], idx});
+                processed[idx] = true;
+            }
+        }
+    }
 
-            for (int d = 0; d < 8; ++d) {
-                int nx = static_cast<int>(x) + DX[d];
-                int ny = static_cast<int>(y) + DY[d];
-                float nh = data[ny * w + nx];
+    // Process cells from lowest to highest
+    while (!pq.empty()) {
+        auto [height, idx] = pq.top();
+        pq.pop();
 
-                if (nh < center) {
-                    isMin = false;
-                    break;
-                }
-                minNeighbor = std::min(minNeighbor, nh);
+        size_t x = idx % w;
+        size_t y = idx / w;
+
+        // Check all 8 neighbors
+        for (int d = 0; d < 8; ++d) {
+            int nx = static_cast<int>(x) + DX[d];
+            int ny = static_cast<int>(y) + DY[d];
+
+            if (nx < 0 || nx >= static_cast<int>(w) ||
+                ny < 0 || ny >= static_cast<int>(h)) {
+                continue;
             }
 
-            if (isMin) {
-                // Depression depth = height to overflow
-                float lowestNeighbor = 1e9f;
-                for (int d = 0; d < 8; ++d) {
-                    int nx = static_cast<int>(x) + DX[d];
-                    int ny = static_cast<int>(y) + DY[d];
-                    lowestNeighbor = std::min(lowestNeighbor, data[ny * w + nx]);
-                }
-                lake[idx] = lowestNeighbor - center;
+            size_t nidx = ny * w + nx;
+            if (processed[nidx]) continue;
+
+            processed[nidx] = true;
+
+            float neighborHeight = data[nidx];
+
+            // If neighbor is lower than current water level, it's in a depression
+            if (neighborHeight < filledHeight[idx]) {
+                filledHeight[nidx] = filledHeight[idx];
+                // Lake depth = water surface - ground
+                lake[nidx] = filledHeight[idx] - neighborHeight;
+            } else {
+                filledHeight[nidx] = neighborHeight;
             }
+
+            pq.push({filledHeight[nidx], nidx});
+        }
+    }
+
+    // Only keep lakes above sea level (not ocean)
+    for (size_t i = 0; i < w * h; ++i) {
+        if (data[i] < m_config.seaLevel) {
+            lake[i] = 0.0f;
         }
     }
 }
@@ -280,7 +323,64 @@ std::unique_ptr<Heightmap> RiverMapper::generateLakeMap(const Heightmap& terrain
     const size_t h = terrain.height();
 
     auto lakeMap = std::make_unique<Heightmap>(w, h);
+
+    // First find true depressions
     findDepressions(terrain, *lakeMap);
+
+    // Also find "river pools" - flat areas with high flow accumulation
+    // These are places where rivers would naturally spread out: deltas, wetlands, floodplains
+
+    std::vector<int> flowDir(w * h);
+    Heightmap flowAcc(w, h);
+    calculateFlowDirections(terrain, flowDir);
+    calculateFlowAccumulation(terrain, flowDir, flowAcc);
+
+    const float* heightData = terrain.data();
+    const float* flowData = flowAcc.data();
+    float* lakeData = lakeMap->data();
+
+    float maxFlow = flowAcc.max();
+    if (maxFlow < 1.0f) maxFlow = 1.0f;
+
+    // High flow threshold for forming pools (top 1% of flow)
+    float poolFlowThreshold = maxFlow * 0.01f;
+
+    #ifdef WORLDGEN_USE_OPENMP
+    #pragma omp parallel for schedule(static)
+    #endif
+    for (size_t y = 2; y < h - 2; ++y) {
+        for (size_t x = 2; x < w - 2; ++x) {
+            size_t idx = y * w + x;
+
+            if (heightData[idx] < m_config.seaLevel) continue;  // Skip ocean
+
+            float flow = flowData[idx];
+            if (flow < poolFlowThreshold) continue;
+
+            // Calculate local gradient (steepness)
+            float centerH = heightData[idx];
+            float gradient = 0.0f;
+            for (int d = 0; d < 8; ++d) {
+                int nx = static_cast<int>(x) + DX[d];
+                int ny = static_cast<int>(y) + DY[d];
+                float dh = std::abs(heightData[ny * w + nx] - centerH) / DIST[d];
+                gradient = std::max(gradient, dh);
+            }
+
+            // Low gradient + high flow = river pool/wetland
+            // Gradient threshold: flatter = more likely to pool
+            if (gradient < 0.02f) {
+                float flowIntensity = (flow - poolFlowThreshold) / (maxFlow - poolFlowThreshold);
+                float flatness = 1.0f - (gradient / 0.02f);
+
+                // Pool intensity based on flow and flatness
+                float poolIntensity = flowIntensity * flatness * 0.5f;
+
+                // Add to existing lake data (don't overwrite depressions)
+                lakeData[idx] = std::max(lakeData[idx], poolIntensity);
+            }
+        }
+    }
 
     return lakeMap;
 }

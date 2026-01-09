@@ -153,10 +153,15 @@ int runHeadless(int steps, int exportInterval, int seed, int size) {
     std::cout << "Exported: simulation_final.png" << std::endl;
 
     // Export standalone river map (2D grayscale - rivers only, no terrain)
-    std::cout << "Generating standalone river map..." << std::endl;
-    auto finalRiverMap = riverMapper.generateWaterMap(*terrain.height);
+    std::cout << "Generating standalone water maps..." << std::endl;
+    auto finalRiverMap = riverMapper.generateRiverMap(*terrain.height);
+    auto finalLakeMap = riverMapper.generateLakeMap(*terrain.height);
+    auto finalWaterMap = riverMapper.generateWaterMap(*terrain.height);
+
     exportHeightmapToPNG(*finalRiverMap, "river_map_2d.png");
-    std::cout << "Exported: river_map_2d.png (2D river map - white=water, black=land)" << std::endl;
+    exportHeightmapToPNG(*finalLakeMap, "lake_map_2d.png");
+    exportHeightmapToPNG(*finalWaterMap, "water_map_2d.png");
+    std::cout << "Exported: river_map_2d.png, lake_map_2d.png, water_map_2d.png" << std::endl;
 
     return 0;
 }
