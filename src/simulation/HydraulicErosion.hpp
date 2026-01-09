@@ -11,21 +11,21 @@
 namespace worldgen {
 
 struct HydraulicParams {
-    int dropletsPerStep = 200000;
-    int maxDropletLifetime = 500;   // Much longer - droplets run until reaching water
+    int dropletsPerStep = 100000;
+    int maxDropletLifetime = 64;    // Safety cap - most terminate at sea/lake before this
     float inertia = 0.05f;
     float sedimentCapacity = 4.0f;
     float minSedimentCapacity = 0.01f;
     float depositSpeed = 0.3f;
-    float erodeSpeed = 0.3f;
-    float evaporateSpeed = 0.001f;  // Very slow evaporation - droplets mostly end at sea/lake
+    float erodeSpeed = 0.2f;        // Gentler erosion to avoid holes
+    float evaporateSpeed = 0.02f;   // Moderate evaporation
     float gravity = 4.0f;
     int erosionRadius = 3;
     float initialWater = 1.0f;
     float initialSpeed = 1.0f;
     int parallelChunks = 4;  // Grid partitioning for parallel simulation
 
-    // Termination conditions
+    // Termination conditions - droplets end at water bodies
     float seaLevel = 0.32f;         // Droplets stop when reaching sea level
     float minWaterForTermination = 0.01f;  // Minimum water depth to consider as lake
 };
