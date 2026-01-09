@@ -62,6 +62,7 @@ set(WORLDGEN_SOURCES
     src/renderer/ColorMapper.cpp
     src/renderer/TerrainShader.cpp
     src/renderer/ObliqueRenderer.cpp
+    src/renderer/HeadlessRenderer.cpp
     src/io/ImageExporter.cpp
 )
 
