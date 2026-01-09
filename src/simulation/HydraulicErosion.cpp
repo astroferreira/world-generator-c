@@ -213,27 +213,21 @@ void HydraulicErosion::simulateDroplet(Random& rng, int chunkX, int chunkY, int 
         // === TERMINATION CONDITIONS ===
 
         // 1. Reached sea level - droplet joins the ocean
+        // Don't deposit sediment here - ocean currents carry it away
         if (current.height <= seaLevel) {
-            // Deposit remaining sediment at coastline
-            if (sediment > 0.001f) {
-                heightData[dropletIndex] += sediment * 0.5f;
-            }
             break;
         }
 
         // 2. Reached a lake/water body - droplet joins existing water
+        // Don't deposit at lakes either - sediment settles on lake bottom (not terrain)
         if (waterData && waterData[dropletIndex] > minWaterForLake) {
-            // Deposit sediment in lake (forms deltas)
-            if (sediment > 0.001f) {
-                heightData[dropletIndex] += sediment * 0.3f;
-            }
             break;
         }
 
         // 3. Droplet is stuck in a pit (no gradient, very slow)
+        // Only deposit sediment in inland depressions, not at water bodies
         if (speed < 0.001f && lifetime > 10) {
-            // Deposit all sediment here
-            heightData[dropletIndex] += sediment;
+            heightData[dropletIndex] += sediment * 0.5f;  // Partial deposit
             break;
         }
 
