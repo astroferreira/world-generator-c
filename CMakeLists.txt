@@ -57,6 +57,7 @@ set(WORLDGEN_SOURCES
     src/simulation/ThermalErosion.cpp
     src/simulation/HydrologySimulation.cpp
     src/simulation/GlacierSystem.cpp
+    src/analysis/RiverMapper.cpp
     src/renderer/Window.cpp
     src/renderer/HeightmapView.cpp
     src/renderer/ColorMapper.cpp

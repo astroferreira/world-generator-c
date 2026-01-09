@@ -6,11 +6,43 @@
 #include "simulation/HydrologySimulation.hpp"
 #include "simulation/GlacierSystem.hpp"
 #include "simulation/HydraulicErosion.hpp"
+#include "analysis/RiverMapper.hpp"
 #include "renderer/ColorMapper.hpp"
+#include "stb/stb_image_write.h"
 #include <iostream>
 #include <string>
 #include <cstring>
 #include <sstream>
+#include <vector>
+#include <algorithm>
+
+// Export a heightmap as grayscale PNG (0=black, 1=white)
+bool exportHeightmapToPNG(const worldgen::Heightmap& map, const std::string& filename) {
+    const size_t w = map.width();
+    const size_t h = map.height();
+    const float* data = map.data();
+
+    std::vector<uint8_t> pixels(w * h);
+
+    // Find max value for normalization
+    float maxVal = 0.0f;
+    for (size_t i = 0; i < w * h; ++i) {
+        maxVal = std::max(maxVal, data[i]);
+    }
+    if (maxVal < 0.001f) maxVal = 1.0f;
+
+    // Convert to grayscale
+    for (size_t i = 0; i < w * h; ++i) {
+        float normalized = std::min(1.0f, data[i] / maxVal);
+        pixels[i] = static_cast<uint8_t>(normalized * 255.0f);
+    }
+
+    return stbi_write_png(filename.c_str(),
+                          static_cast<int>(w),
+                          static_cast<int>(h),
+                          1, pixels.data(),
+                          static_cast<int>(w)) != 0;
+}
 
 void printUsage(const char* programName) {
     std::cout << "Usage: " << programName << " [options]\n\n";
@@ -70,9 +102,19 @@ int runHeadless(int steps, int exportInterval, int seed, int size) {
 
     std::cout << "\nStarting simulation..." << std::endl;
 
+    // Setup river mapper for terrain-based water visualization
+    worldgen::RiverMapper riverMapper;
+
+    // Helper lambda to render with river analysis
+    auto renderWithRivers = [&](const std::string& filename) {
+        // Analyze terrain to generate river map (uses flow accumulation + valley detection)
+        auto riverMap = riverMapper.generateWaterMap(*terrain.height);
+        renderer.render(terrain, colorMapper, riverMap.get());
+        renderer.exportToPNG(filename);
+    };
+
     // Export initial state
-    renderer.render(terrain, colorMapper);
-    renderer.exportToPNG("simulation_step_0_initial.png");
+    renderWithRivers("simulation_step_0_initial.png");
     std::cout << "Exported: simulation_step_0_initial.png" << std::endl;
 
     // Run simulation
@@ -99,17 +141,22 @@ int runHeadless(int steps, int exportInterval, int seed, int size) {
             }
             filename << ".png";
 
-            renderer.render(terrain, colorMapper);
-            renderer.exportToPNG(filename.str());
+            renderWithRivers(filename.str());
             std::cout << "\nExported: " << filename.str() << std::endl;
         }
     }
 
-    // Final export
+    // Final export with analyzed river map
     std::cout << "\n\nSimulation complete!" << std::endl;
-    renderer.render(terrain, colorMapper);
-    renderer.exportToPNG("simulation_final.png");
+    std::cout << "Analyzing terrain for river visualization..." << std::endl;
+    renderWithRivers("simulation_final.png");
     std::cout << "Exported: simulation_final.png" << std::endl;
+
+    // Export standalone river map (2D grayscale - rivers only, no terrain)
+    std::cout << "Generating standalone river map..." << std::endl;
+    auto finalRiverMap = riverMapper.generateWaterMap(*terrain.height);
+    exportHeightmapToPNG(*finalRiverMap, "river_map_2d.png");
+    std::cout << "Exported: river_map_2d.png (2D river map - white=water, black=land)" << std::endl;
 
     return 0;
 }

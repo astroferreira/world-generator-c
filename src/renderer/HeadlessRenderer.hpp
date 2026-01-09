@@ -25,6 +25,10 @@ public:
     // Render terrain to internal pixel buffer
     void render(const TerrainData& terrain, const ColorMapper& colorMapper);
 
+    // Render with explicit river map (derived from terrain analysis)
+    void render(const TerrainData& terrain, const ColorMapper& colorMapper,
+                const Heightmap* riverMap);
+
     // Export rendered image to PNG file
     bool exportToPNG(const std::string& filename) const;
 

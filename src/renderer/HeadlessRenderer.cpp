@@ -55,6 +55,11 @@ uint32_t HeadlessRenderer::applyShading(uint32_t color, float shade) {
 }
 
 void HeadlessRenderer::render(const TerrainData& terrain, const ColorMapper& colorMapper) {
+    render(terrain, colorMapper, nullptr);
+}
+
+void HeadlessRenderer::render(const TerrainData& terrain, const ColorMapper& colorMapper,
+                               const Heightmap* riverMap) {
     const size_t w = terrain.width();
     const size_t h = terrain.heightDim();
 
@@ -76,9 +81,12 @@ void HeadlessRenderer::render(const TerrainData& terrain, const ColorMapper& col
     const bool enableShading = m_config.enableShading;
 
     const float* heightData = terrain.height->data();
-    const float* waterData = terrain.water ? terrain.water->data() : nullptr;
+    const float* riverData = riverMap ? riverMap->data() : nullptr;
     const float* iceData = terrain.hydrology ? terrain.hydrology->iceThickness->data() : nullptr;
     const float* snowData = terrain.hydrology ? terrain.hydrology->snowpack->data() : nullptr;
+
+    // River/water color
+    const uint8_t waterR = 30, waterG = 100, waterB = 180;
 
     // Pre-compute shading data
     struct ShadedPixel {
@@ -97,11 +105,37 @@ void HeadlessRenderer::render(const TerrainData& terrain, const ColorMapper& col
             size_t idx = mapY * w + x;
             float height = heightData[idx];
 
-            float waterDepth = waterData ? waterData[idx] : 0.0f;
+            // Get river intensity from analyzed map (0-1)
+            float riverIntensity = riverData ? riverData[idx] : 0.0f;
             float iceThickness = iceData ? iceData[idx] : 0.0f;
             float snowDepth = snowData ? snowData[idx] : 0.0f;
 
-            Color baseColor = colorMapper.getColorWithWater(height, waterDepth, iceThickness, snowDepth);
+            // Get base terrain color
+            Color baseColor = colorMapper.getColor(height);
+
+            // Blend with river color based on intensity
+            if (riverIntensity > 0.001f) {
+                // Stronger blending: square root makes smaller rivers more visible
+                float blend = std::min(1.0f, std::sqrt(riverIntensity) * 2.0f);
+                baseColor.r = static_cast<uint8_t>(baseColor.r * (1.0f - blend) + waterR * blend);
+                baseColor.g = static_cast<uint8_t>(baseColor.g * (1.0f - blend) + waterG * blend);
+                baseColor.b = static_cast<uint8_t>(baseColor.b * (1.0f - blend) + waterB * blend);
+            }
+
+            // Apply ice/snow on top
+            if (iceThickness > 0.01f) {
+                float iceBlend = std::min(1.0f, iceThickness * 3.0f);
+                baseColor.r = static_cast<uint8_t>(baseColor.r * (1.0f - iceBlend) + 200 * iceBlend);
+                baseColor.g = static_cast<uint8_t>(baseColor.g * (1.0f - iceBlend) + 220 * iceBlend);
+                baseColor.b = static_cast<uint8_t>(baseColor.b * (1.0f - iceBlend) + 255 * iceBlend);
+            }
+            if (snowDepth > 0.01f) {
+                float snowBlend = std::min(1.0f, snowDepth * 5.0f);
+                baseColor.r = static_cast<uint8_t>(baseColor.r * (1.0f - snowBlend) + 250 * snowBlend);
+                baseColor.g = static_cast<uint8_t>(baseColor.g * (1.0f - snowBlend) + 250 * snowBlend);
+                baseColor.b = static_cast<uint8_t>(baseColor.b * (1.0f - snowBlend) + 255 * snowBlend);
+            }
+
             uint32_t colorARGB = baseColor.toARGB();
 
             float shade = 1.0f;

@@ -18,7 +18,8 @@ cmake-build-*/
 # Generated files
 compile_commands.json
 
-# Output images (except test_outputs/)
+# Output images (except test_outputs/ and sample_outputs/)
 *.png
 *.raw
 !test_outputs/*.png
+!sample_outputs/*.png
