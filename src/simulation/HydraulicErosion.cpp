@@ -194,6 +194,11 @@ void HydraulicErosion::simulateDroplet(Random& rng, int chunkX, int chunkY, int 
     const float evaporateSpeed = m_params.evaporateSpeed;
     const float gravity = m_params.gravity;
     const float evapMultiplier = 1.0f - evaporateSpeed;
+    const float seaLevel = m_params.seaLevel;
+    const float minWaterForLake = m_params.minWaterForTermination;
+
+    // Get water data for lake detection
+    const float* waterData = m_terrain->water ? m_terrain->water->data() : nullptr;
 
     // Calculate initial height and gradient (will be reused in next iteration)
     auto current = calculateHeightAndGradient(posX, posY);
@@ -204,6 +209,33 @@ void HydraulicErosion::simulateDroplet(Random& rng, int chunkX, int chunkY, int 
         int nodeX = static_cast<int>(posX);
         int nodeY = static_cast<int>(posY);
         int dropletIndex = nodeY * w + nodeX;
+
+        // === TERMINATION CONDITIONS ===
+
+        // 1. Reached sea level - droplet joins the ocean
+        if (current.height <= seaLevel) {
+            // Deposit remaining sediment at coastline
+            if (sediment > 0.001f) {
+                heightData[dropletIndex] += sediment * 0.5f;
+            }
+            break;
+        }
+
+        // 2. Reached a lake/water body - droplet joins existing water
+        if (waterData && waterData[dropletIndex] > minWaterForLake) {
+            // Deposit sediment in lake (forms deltas)
+            if (sediment > 0.001f) {
+                heightData[dropletIndex] += sediment * 0.3f;
+            }
+            break;
+        }
+
+        // 3. Droplet is stuck in a pit (no gradient, very slow)
+        if (speed < 0.001f && lifetime > 10) {
+            // Deposit all sediment here
+            heightData[dropletIndex] += sediment;
+            break;
+        }
 
         float cellOffsetX = posX - nodeX;
         float cellOffsetY = posY - nodeY;
@@ -223,7 +255,7 @@ void HydraulicErosion::simulateDroplet(Random& rng, int chunkX, int chunkY, int 
         float newPosX = posX + dirX;
         float newPosY = posY + dirY;
 
-        // Check bounds
+        // 4. Check bounds - droplet leaves terrain
         if (newPosX < 0 || newPosX >= w - 1 || newPosY < 0 || newPosY >= h - 1) {
             break;
         }
@@ -273,11 +305,12 @@ void HydraulicErosion::simulateDroplet(Random& rng, int chunkX, int chunkY, int 
         posY = newPosY;
         current = next;  // Reuse calculated height for next iteration
 
-        // Update speed and water
+        // Update speed and water (very slow evaporation)
         speed = std::sqrt(std::max(0.0f, speed * speed + deltaHeight * gravity));
         water *= evapMultiplier;
 
-        if (water < 0.01f) break;
+        // 5. Only terminate from evaporation if water is nearly gone
+        if (water < 0.001f) break;
     }
 }
 
