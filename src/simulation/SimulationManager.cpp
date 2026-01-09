@@ -20,16 +20,33 @@ void SimulationManager::initialize(TerrainData& terrain) {
 }
 
 void SimulationManager::step() {
-    if (m_currentIndex >= m_simulations.size()) return;
-
-    auto& sim = m_simulations[m_currentIndex];
-    sim->step();
-
-    if (m_callback) {
-        m_callback(sim->name(), sim->iterations());
+    if (m_currentIndex >= m_simulations.size()) {
+        // All sequential simulations complete - only step continuous ones
+        for (auto& sim : m_simulations) {
+            if (sim->isContinuous()) {
+                sim->step();
+            }
+        }
+        return;
     }
 
-    if (sim->isComplete()) {
+    auto& currentSim = m_simulations[m_currentIndex];
+
+    // Step the current sequential simulation
+    currentSim->step();
+
+    if (m_callback) {
+        m_callback(currentSim->name(), currentSim->iterations());
+    }
+
+    // Also step any continuous simulations (except if it's the current one)
+    for (size_t i = 0; i < m_simulations.size(); ++i) {
+        if (i != m_currentIndex && m_simulations[i]->isContinuous()) {
+            m_simulations[i]->step();
+        }
+    }
+
+    if (currentSim->isComplete()) {
         ++m_currentIndex;
     }
 }

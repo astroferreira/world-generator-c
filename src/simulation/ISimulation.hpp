@@ -15,6 +15,10 @@ public:
     virtual void reset() = 0;
     virtual int iterations() const = 0;
     virtual bool isComplete() const { return false; }
+
+    // Continuous simulations run alongside other simulations
+    // (e.g., hydrology updates as terrain changes from erosion)
+    virtual bool isContinuous() const { return false; }
 };
 
 } // namespace worldgen

@@ -137,11 +137,14 @@ void Application::generateTerrain() {
         m_terrain.heightDim()
     );
 
-    // Setup simulations (order matters: thermal -> glacier -> hydrology -> hydraulic)
+    // Setup simulations
+    // Order: thermal -> hydrology (continuous) -> glacier -> hydraulic
+    // Hydrology is continuous - it runs alongside all other simulations and
+    // periodically recalculates rivers as terrain changes from erosion
     m_simManager.clear();
     m_simManager.addSimulation(std::make_unique<ThermalErosion>());
+    m_simManager.addSimulation(std::make_unique<HydrologySimulation>());  // Continuous
     m_simManager.addSimulation(std::make_unique<GlacierSystem>());
-    m_simManager.addSimulation(std::make_unique<HydrologySimulation>());
     m_simManager.addSimulation(std::make_unique<HydraulicErosion>());
     m_simManager.initialize(m_terrain);
 

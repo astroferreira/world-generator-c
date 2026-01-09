@@ -91,7 +91,11 @@ struct HydrologyParams {
     float meanderStrength = 0.05f;
     float deltaFormationRate = 0.003f;
 
-    // Completion
+    // Continuous mode - recalculate flow network as terrain changes
+    int recalculateInterval = 5;  // Recalculate full flow network every N steps
+    bool continuous = true;       // Keep running alongside other simulations
+
+    // Completion (only used if continuous = false)
     int maxIterations = 50;
     float convergenceThreshold = 0.0001f;
 };

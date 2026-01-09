@@ -40,26 +40,42 @@ void HydrologySimulation::step() {
 
     if (!m_initialized) {
         // First pass: establish flow network
-        fillDepressions();
-        calculateFlowDirections();
-        addRainfall();
-        addSpringFlow();
-        calculateFlowAccumulation();
-        formLakes();
-        buildRiverNetwork();
+        recalculateFlowNetwork();
         m_initialized = true;
     } else {
-        // Subsequent passes: dynamics
-        erodeRiverChannels();
-        depositSediment();
-        formDeltas();
-        updateSeasonalFlow();
+        // Periodically recalculate the full flow network to respond to terrain changes
+        bool shouldRecalculate = (m_iterations % m_params.recalculateInterval) == 0;
 
-        // Re-update water levels
-        buildRiverNetwork();
+        if (shouldRecalculate) {
+            // Full recalculation - terrain may have changed from erosion
+            recalculateFlowNetwork();
+        } else {
+            // Lighter update - dynamics only
+            erodeRiverChannels();
+            depositSediment();
+            formDeltas();
+            updateSeasonalFlow();
+            buildRiverNetwork();
+        }
     }
 
     ++m_iterations;
+}
+
+void HydrologySimulation::recalculateFlowNetwork() {
+    if (!m_terrain || !m_terrain->hydrology) return;
+
+    // Clear existing water to rebuild from scratch
+    m_terrain->water->fill(0.0f);
+
+    // Recalculate everything based on current terrain
+    fillDepressions();
+    calculateFlowDirections();
+    addRainfall();
+    addSpringFlow();
+    calculateFlowAccumulation();
+    formLakes();
+    buildRiverNetwork();
 }
 
 void HydrologySimulation::reset() {
@@ -71,6 +87,11 @@ void HydrologySimulation::reset() {
 }
 
 bool HydrologySimulation::isComplete() const {
+    // In continuous mode, complete after initial setup so other simulations can run,
+    // but we'll keep stepping via isContinuous()
+    if (m_params.continuous) {
+        return m_initialized;  // Complete once initialized, but keep running
+    }
     return m_iterations >= m_params.maxIterations;
 }
 

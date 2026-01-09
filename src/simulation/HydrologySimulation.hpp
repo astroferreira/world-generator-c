@@ -19,6 +19,10 @@ public:
     void reset() override;
     int iterations() const override { return m_iterations; }
     bool isComplete() const override;
+    bool isContinuous() const override { return m_params.continuous; }
+
+    // Recalculate the entire flow network based on current terrain
+    void recalculateFlowNetwork();
 
     void setParams(const HydrologyParams& params);
     const HydrologyParams& params() const { return m_params; }
