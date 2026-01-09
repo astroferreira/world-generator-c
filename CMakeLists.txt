@@ -24,8 +24,24 @@ option(WORLDGEN_ENABLE_OPENMP "Enable OpenMP parallelization" ON)
 # Find SDL2
 find_package(SDL2 REQUIRED)
 
-# Find OpenMP (optional)
+# Find OpenMP (optional) - with macOS Homebrew support
 if(WORLDGEN_ENABLE_OPENMP)
+    if(APPLE)
+        # Help CMake find libomp from Homebrew
+        execute_process(
+            COMMAND brew --prefix libomp
+            OUTPUT_VARIABLE LIBOMP_PREFIX
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(LIBOMP_PREFIX)
+            set(OpenMP_C_FLAGS "-Xpreprocessor -fopenmp -I${LIBOMP_PREFIX}/include")
+            set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp -I${LIBOMP_PREFIX}/include")
+            set(OpenMP_C_LIB_NAMES "omp")
+            set(OpenMP_CXX_LIB_NAMES "omp")
+            set(OpenMP_omp_LIBRARY "${LIBOMP_PREFIX}/lib/libomp.dylib")
+        endif()
+    endif()
     find_package(OpenMP)
 endif()
 
@@ -39,9 +55,13 @@ set(WORLDGEN_SOURCES
     src/simulation/SimulationManager.cpp
     src/simulation/HydraulicErosion.cpp
     src/simulation/ThermalErosion.cpp
+    src/simulation/HydrologySimulation.cpp
+    src/simulation/GlacierSystem.cpp
     src/renderer/Window.cpp
     src/renderer/HeightmapView.cpp
     src/renderer/ColorMapper.cpp
+    src/renderer/TerrainShader.cpp
+    src/renderer/ObliqueRenderer.cpp
     src/io/ImageExporter.cpp
 )
 

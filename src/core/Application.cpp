@@ -46,7 +46,37 @@ bool Application::initialize() {
     m_colorMapper.applyPreset(ColorMapper::Preset::Terrain);
     m_colorMapper.buildLUT(4096);
 
+    printHelp();
+
     return true;
+}
+
+void Application::printHelp() {
+    std::cout << "\n";
+    std::cout << "=== World Generator Controls ===" << std::endl;
+    std::cout << "\n";
+    std::cout << "  SIMULATION:" << std::endl;
+    std::cout << "    Space     - Start/Pause simulation" << std::endl;
+    std::cout << "    S         - Step simulation once" << std::endl;
+    std::cout << "    R         - Regenerate terrain (new seed)" << std::endl;
+    std::cout << "\n";
+    std::cout << "  VIEW:" << std::endl;
+    std::cout << "    V         - Toggle 2D / 3D oblique view" << std::endl;
+    std::cout << "    G         - Toggle grayscale / color" << std::endl;
+    std::cout << "    W         - Toggle water rendering" << std::endl;
+    std::cout << "    L         - Rotate light direction (3D view)" << std::endl;
+    std::cout << "\n";
+    std::cout << "  NAVIGATION:" << std::endl;
+    std::cout << "    +/-       - Zoom in/out" << std::endl;
+    std::cout << "    Arrows    - Pan view" << std::endl;
+    std::cout << "    0         - Reset zoom and pan" << std::endl;
+    std::cout << "\n";
+    std::cout << "  OTHER:" << std::endl;
+    std::cout << "    E         - Export terrain.png" << std::endl;
+    std::cout << "    Q/Esc     - Quit" << std::endl;
+    std::cout << "\n";
+    std::cout << "=================================" << std::endl;
+    std::cout << "\n";
 }
 
 void Application::run() {
@@ -94,16 +124,24 @@ void Application::generateTerrain() {
         std::cout << "  " << stage << " (" << static_cast<int>(progress * 100) << "%)" << std::endl;
     });
 
-    // Create or recreate heightmap view
+    // Create or recreate heightmap view and oblique renderer
     m_heightmapView = std::make_unique<HeightmapView>(
         m_renderer,
         m_terrain.width(),
         m_terrain.heightDim()
     );
 
-    // Setup simulations
+    m_obliqueRenderer = std::make_unique<ObliqueRenderer>(
+        m_renderer,
+        m_terrain.width(),
+        m_terrain.heightDim()
+    );
+
+    // Setup simulations (order matters: thermal -> glacier -> hydrology -> hydraulic)
     m_simManager.clear();
     m_simManager.addSimulation(std::make_unique<ThermalErosion>());
+    m_simManager.addSimulation(std::make_unique<GlacierSystem>());
+    m_simManager.addSimulation(std::make_unique<HydrologySimulation>());
     m_simManager.addSimulation(std::make_unique<HydraulicErosion>());
     m_simManager.initialize(m_terrain);
 
@@ -131,7 +169,14 @@ void Application::stepSimulation() {
 }
 
 void Application::exportHeightmap(const std::string& filename) {
-    if (ImageExporter::exportPNG(*m_terrain.height, m_colorMapper, filename)) {
+    bool success;
+    if (m_waterRenderingEnabled) {
+        success = ImageExporter::exportWithWater(m_terrain, m_colorMapper, filename);
+    } else {
+        success = ImageExporter::exportPNG(*m_terrain.height, m_colorMapper, filename);
+    }
+
+    if (success) {
         std::cout << "Exported to " << filename << std::endl;
     } else {
         std::cerr << "Failed to export to " << filename << std::endl;
@@ -167,6 +212,9 @@ void Application::handleKeyDown(SDL_Keycode key) {
             break;
         case SDLK_r:
             m_seed = static_cast<int>(SDL_GetTicks());
+            m_zoomLevel = 1.0f;
+            m_viewOffsetX = 0.0f;
+            m_viewOffsetY = 0.0f;
             generateTerrain();
             break;
         case SDLK_s:
@@ -182,17 +230,110 @@ void Application::handleKeyDown(SDL_Keycode key) {
             m_colorMapper.applyPreset(grayscale ? ColorMapper::Preset::Grayscale : ColorMapper::Preset::Terrain);
             m_needsRedraw = true;
             break;
+        case SDLK_w:
+            // Toggle water rendering
+            m_waterRenderingEnabled = !m_waterRenderingEnabled;
+            std::cout << "Water rendering: " << (m_waterRenderingEnabled ? "ON" : "OFF") << std::endl;
+            m_needsRedraw = true;
+            break;
+
+        case SDLK_v:
+            // Toggle view mode (top-down / oblique)
+            m_viewMode = (m_viewMode == ViewMode::TopDown) ? ViewMode::Oblique : ViewMode::TopDown;
+            std::cout << "View mode: " << (m_viewMode == ViewMode::TopDown ? "Top-Down" : "Oblique 2.5D") << std::endl;
+            m_needsRedraw = true;
+            break;
+
+        case SDLK_l:
+            // Rotate light direction
+            if (m_obliqueRenderer) {
+                m_obliqueRenderer->rotateLight(45.0f);
+                std::cout << "Light rotated" << std::endl;
+                m_needsRedraw = true;
+            }
+            break;
+
+        // Zoom controls
+        case SDLK_EQUALS:
+        case SDLK_PLUS:
+        case SDLK_KP_PLUS:
+            if (m_zoomLevel < MAX_ZOOM) {
+                m_zoomLevel *= ZOOM_STEP;
+                if (m_zoomLevel > MAX_ZOOM) m_zoomLevel = MAX_ZOOM;
+                std::cout << "Zoom: " << static_cast<int>(m_zoomLevel * 100) << "%" << std::endl;
+                m_needsRedraw = true;
+            }
+            break;
+        case SDLK_MINUS:
+        case SDLK_KP_MINUS:
+            if (m_zoomLevel > MIN_ZOOM) {
+                m_zoomLevel /= ZOOM_STEP;
+                if (m_zoomLevel < MIN_ZOOM) m_zoomLevel = MIN_ZOOM;
+                std::cout << "Zoom: " << static_cast<int>(m_zoomLevel * 100) << "%" << std::endl;
+                m_needsRedraw = true;
+            }
+            break;
+        case SDLK_0:
+            // Reset zoom and position
+            m_zoomLevel = 1.0f;
+            m_viewOffsetX = 0.0f;
+            m_viewOffsetY = 0.0f;
+            std::cout << "View reset" << std::endl;
+            m_needsRedraw = true;
+            break;
+
+        // Pan controls
+        case SDLK_LEFT:
+            m_viewOffsetX += PAN_STEP;
+            m_needsRedraw = true;
+            break;
+        case SDLK_RIGHT:
+            m_viewOffsetX -= PAN_STEP;
+            m_needsRedraw = true;
+            break;
+        case SDLK_UP:
+            m_viewOffsetY += PAN_STEP;
+            m_needsRedraw = true;
+            break;
+        case SDLK_DOWN:
+            m_viewOffsetY -= PAN_STEP;
+            m_needsRedraw = true;
+            break;
     }
 }
 
 void Application::render() {
-    m_heightmapView->update(*m_terrain.height, m_colorMapper);
-
     SDL_SetRenderDrawColor(m_renderer, 0, 0, 0, 255);
     SDL_RenderClear(m_renderer);
 
-    SDL_Rect destRect = {0, 0, m_config.windowWidth, m_config.windowHeight};
-    m_heightmapView->render(destRect);
+    // Apply zoom and pan to destination rectangle
+    int zoomedWidth = static_cast<int>(m_config.windowWidth * m_zoomLevel);
+    int zoomedHeight = static_cast<int>(m_config.windowHeight * m_zoomLevel);
+
+    // Center the zoomed view and apply pan offset
+    int centerOffsetX = (m_config.windowWidth - zoomedWidth) / 2;
+    int centerOffsetY = (m_config.windowHeight - zoomedHeight) / 2;
+
+    SDL_Rect destRect = {
+        centerOffsetX + static_cast<int>(m_viewOffsetX),
+        centerOffsetY + static_cast<int>(m_viewOffsetY),
+        zoomedWidth,
+        zoomedHeight
+    };
+
+    if (m_viewMode == ViewMode::Oblique && m_obliqueRenderer) {
+        // Oblique 2.5D view with shading
+        m_obliqueRenderer->renderToTexture(m_terrain, m_colorMapper);
+        m_obliqueRenderer->display(destRect);
+    } else {
+        // Top-down 2D view
+        if (m_waterRenderingEnabled) {
+            m_heightmapView->updateWithWater(m_terrain, m_colorMapper);
+        } else {
+            m_heightmapView->update(*m_terrain.height, m_colorMapper);
+        }
+        m_heightmapView->render(destRect);
+    }
 
     SDL_RenderPresent(m_renderer);
 }
@@ -211,6 +352,14 @@ void Application::updateTitle() {
         title << " [RUNNING]";
     } else {
         title << " [PAUSED]";
+    }
+
+    if (m_zoomLevel != 1.0f) {
+        title << " [" << static_cast<int>(m_zoomLevel * 100) << "%]";
+    }
+
+    if (m_viewMode == ViewMode::Oblique) {
+        title << " [3D]";
     }
 
     m_window->setTitle(title.str());

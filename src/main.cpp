@@ -12,6 +12,7 @@ int main(int argc, char* argv[]) {
     std::cout << "  S     - Single simulation step" << std::endl;
     std::cout << "  E     - Export to terrain.png" << std::endl;
     std::cout << "  G     - Toggle grayscale view" << std::endl;
+    std::cout << "  W     - Toggle water/ice/snow rendering" << std::endl;
     std::cout << "  Q/Esc - Quit" << std::endl;
     std::cout << std::endl;
 

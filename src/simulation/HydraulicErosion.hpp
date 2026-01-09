@@ -4,6 +4,10 @@
 #include "utils/Random.hpp"
 #include <vector>
 
+#ifdef WORLDGEN_USE_OPENMP
+#include <omp.h>
+#endif
+
 namespace worldgen {
 
 struct HydraulicParams {
@@ -19,6 +23,7 @@ struct HydraulicParams {
     int erosionRadius = 3;
     float initialWater = 1.0f;
     float initialSpeed = 1.0f;
+    int parallelChunks = 4;  // Grid partitioning for parallel simulation
 };
 
 class HydraulicErosion : public ISimulation {
@@ -40,18 +45,32 @@ private:
     Random m_random;
     int m_iterations = 0;
 
-    std::vector<std::vector<int>> m_erosionBrushIndices;
-    std::vector<std::vector<float>> m_erosionBrushWeights;
+    // Precomputed erosion brush (flattened for better cache locality)
+    struct BrushData {
+        std::vector<int> indices;
+        std::vector<float> weights;
+    };
+    std::vector<BrushData> m_erosionBrush;
+
+    // Cached terrain dimensions
+    int m_width = 0;
+    int m_height = 0;
 
     void precomputeErosionBrush();
-    void simulateDroplet();
+    void simulateDroplet(Random& rng, int chunkX, int chunkY, int chunksPerSide);
+    void simulateDropletBatch(int startIdx, int count, Random& rng);
 
     struct HeightAndGradient {
         float height;
         float gradientX;
         float gradientY;
     };
-    HeightAndGradient calculateHeightAndGradient(float posX, float posY);
+
+    // Inline height calculation for better performance
+    HeightAndGradient calculateHeightAndGradient(float posX, float posY) const;
+
+    // Get 4 corner heights for bilinear interpolation (cache-friendly)
+    void getCornerHeights(int x, int y, float& h00, float& h10, float& h01, float& h11) const;
 };
 
 } // namespace worldgen

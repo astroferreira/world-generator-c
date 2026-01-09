@@ -1,31 +1,69 @@
 #include "simulation/HydraulicErosion.hpp"
-#include "utils/Math.hpp"
 #include <cmath>
+#include <algorithm>
 
 namespace worldgen {
 
 HydraulicErosion::HydraulicErosion() {
-    precomputeErosionBrush();
+    // Brush precomputed on initialize when terrain is available
 }
 
 HydraulicErosion::HydraulicErosion(const HydraulicParams& params)
     : m_params(params)
 {
-    precomputeErosionBrush();
 }
 
 void HydraulicErosion::initialize(TerrainData& terrain) {
     m_terrain = &terrain;
     m_iterations = 0;
+    m_width = static_cast<int>(terrain.width());
+    m_height = static_cast<int>(terrain.heightDim());
     precomputeErosionBrush();
 }
 
 void HydraulicErosion::step() {
     if (!m_terrain) return;
 
-    for (int i = 0; i < m_params.dropletsPerStep; ++i) {
-        simulateDroplet();
+    const int chunksPerSide = m_params.parallelChunks;
+    const int dropletsPerChunk = m_params.dropletsPerStep / (chunksPerSide * chunksPerSide);
+
+    // Process chunks in a checkerboard pattern for parallelism
+    // Even pass: chunks where (cx + cy) % 2 == 0
+    // Odd pass: chunks where (cx + cy) % 2 == 1
+    // This ensures non-adjacent chunks are processed, reducing contention
+
+    for (int pass = 0; pass < 2; ++pass) {
+        #ifdef WORLDGEN_USE_OPENMP
+        #pragma omp parallel
+        {
+            // Each thread gets its own RNG seeded differently
+            Random threadRng(static_cast<uint32_t>(m_iterations * 1000 + omp_get_thread_num() * 12345));
+
+            #pragma omp for collapse(2) schedule(dynamic)
+            for (int cy = 0; cy < chunksPerSide; ++cy) {
+                for (int cx = 0; cx < chunksPerSide; ++cx) {
+                    if ((cx + cy) % 2 == pass) {
+                        for (int i = 0; i < dropletsPerChunk; ++i) {
+                            simulateDroplet(threadRng, cx, cy, chunksPerSide);
+                        }
+                    }
+                }
+            }
+        }
+        #else
+        // Sequential fallback
+        for (int cy = 0; cy < chunksPerSide; ++cy) {
+            for (int cx = 0; cx < chunksPerSide; ++cx) {
+                if ((cx + cy) % 2 == pass) {
+                    for (int i = 0; i < dropletsPerChunk; ++i) {
+                        simulateDroplet(m_random, cx, cy, chunksPerSide);
+                    }
+                }
+            }
+        }
+        #endif
     }
+
     ++m_iterations;
 }
 
@@ -34,38 +72,46 @@ void HydraulicErosion::reset() {
 }
 
 void HydraulicErosion::setParams(const HydraulicParams& params) {
+    bool needsRebuild = (params.erosionRadius != m_params.erosionRadius);
     m_params = params;
-    precomputeErosionBrush();
+    if (needsRebuild && m_terrain) {
+        precomputeErosionBrush();
+    }
 }
 
 void HydraulicErosion::precomputeErosionBrush() {
     if (!m_terrain) return;
 
-    const int w = static_cast<int>(m_terrain->width());
-    const int h = static_cast<int>(m_terrain->heightDim());
+    const int w = m_width;
+    const int h = m_height;
+    const int radius = m_params.erosionRadius;
 
-    m_erosionBrushIndices.resize(w * h);
-    m_erosionBrushWeights.resize(w * h);
+    m_erosionBrush.resize(w * h);
 
+    #ifdef WORLDGEN_USE_OPENMP
+    #pragma omp parallel for
+    #endif
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
             int centerIndex = y * w + x;
+            auto& brush = m_erosionBrush[centerIndex];
+
+            brush.indices.clear();
+            brush.weights.clear();
 
             float weightSum = 0.0f;
-            std::vector<int> indices;
-            std::vector<float> weights;
 
-            for (int dy = -m_params.erosionRadius; dy <= m_params.erosionRadius; ++dy) {
-                for (int dx = -m_params.erosionRadius; dx <= m_params.erosionRadius; ++dx) {
+            for (int dy = -radius; dy <= radius; ++dy) {
+                for (int dx = -radius; dx <= radius; ++dx) {
                     int nx = x + dx;
                     int ny = y + dy;
 
                     if (nx >= 0 && nx < w && ny >= 0 && ny < h) {
                         float dist = std::sqrt(static_cast<float>(dx * dx + dy * dy));
-                        if (dist <= m_params.erosionRadius) {
-                            float weight = std::max(0.0f, m_params.erosionRadius - dist);
-                            indices.push_back(ny * w + nx);
-                            weights.push_back(weight);
+                        if (dist <= radius) {
+                            float weight = std::max(0.0f, static_cast<float>(radius) - dist);
+                            brush.indices.push_back(ny * w + nx);
+                            brush.weights.push_back(weight);
                             weightSum += weight;
                         }
                     }
@@ -73,52 +119,86 @@ void HydraulicErosion::precomputeErosionBrush() {
             }
 
             // Normalize weights
-            if (weightSum > 0) {
-                for (auto& w : weights) {
-                    w /= weightSum;
+            if (weightSum > 0.0f) {
+                float invSum = 1.0f / weightSum;
+                for (auto& wt : brush.weights) {
+                    wt *= invSum;
                 }
             }
-
-            m_erosionBrushIndices[centerIndex] = std::move(indices);
-            m_erosionBrushWeights[centerIndex] = std::move(weights);
         }
     }
 }
 
-HydraulicErosion::HeightAndGradient HydraulicErosion::calculateHeightAndGradient(float posX, float posY) {
+inline void HydraulicErosion::getCornerHeights(int x, int y, float& h00, float& h10, float& h01, float& h11) const {
+    const float* data = m_terrain->height->data();
+    const int w = m_width;
+
+    int x1 = std::min(x + 1, m_width - 1);
+    int y1 = std::min(y + 1, m_height - 1);
+
+    h00 = data[y * w + x];
+    h10 = data[y * w + x1];
+    h01 = data[y1 * w + x];
+    h11 = data[y1 * w + x1];
+}
+
+HydraulicErosion::HeightAndGradient HydraulicErosion::calculateHeightAndGradient(float posX, float posY) const {
     int coordX = static_cast<int>(posX);
     int coordY = static_cast<int>(posY);
 
     float x = posX - coordX;
     float y = posY - coordY;
 
-    const int w = static_cast<int>(m_terrain->width());
-    int x1 = std::min(coordX + 1, w - 1);
-    int y1 = std::min(coordY + 1, static_cast<int>(m_terrain->heightDim()) - 1);
+    float h00, h10, h01, h11;
+    getCornerHeights(coordX, coordY, h00, h10, h01, h11);
 
-    float h00 = m_terrain->height->get(coordX, coordY);
-    float h10 = m_terrain->height->get(x1, coordY);
-    float h01 = m_terrain->height->get(coordX, y1);
-    float h11 = m_terrain->height->get(x1, y1);
+    float gradientX = (h10 - h00) * (1.0f - y) + (h11 - h01) * y;
+    float gradientY = (h01 - h00) * (1.0f - x) + (h11 - h10) * x;
 
-    float gradientX = (h10 - h00) * (1 - y) + (h11 - h01) * y;
-    float gradientY = (h01 - h00) * (1 - x) + (h11 - h10) * x;
-
-    float height = h00 * (1 - x) * (1 - y) + h10 * x * (1 - y) + h01 * (1 - x) * y + h11 * x * y;
+    float height = h00 * (1.0f - x) * (1.0f - y) +
+                   h10 * x * (1.0f - y) +
+                   h01 * (1.0f - x) * y +
+                   h11 * x * y;
 
     return {height, gradientX, gradientY};
 }
 
-void HydraulicErosion::simulateDroplet() {
-    const int w = static_cast<int>(m_terrain->width());
-    const int h = static_cast<int>(m_terrain->heightDim());
+void HydraulicErosion::simulateDroplet(Random& rng, int chunkX, int chunkY, int chunksPerSide) {
+    const int w = m_width;
+    const int h = m_height;
 
-    float posX = m_random.nextFloat(0, static_cast<float>(w - 2));
-    float posY = m_random.nextFloat(0, static_cast<float>(h - 2));
+    // Calculate chunk boundaries
+    const int chunkW = (w - 2) / chunksPerSide;
+    const int chunkH = (h - 2) / chunksPerSide;
+
+    const float startX = static_cast<float>(chunkX * chunkW + 1);
+    const float startY = static_cast<float>(chunkY * chunkH + 1);
+    const float endX = static_cast<float>(std::min((chunkX + 1) * chunkW, w - 2));
+    const float endY = static_cast<float>(std::min((chunkY + 1) * chunkH, h - 2));
+
+    // Start droplet within chunk
+    float posX = rng.nextFloat(startX, endX);
+    float posY = rng.nextFloat(startY, endY);
     float dirX = 0.0f, dirY = 0.0f;
     float speed = m_params.initialSpeed;
     float water = m_params.initialWater;
     float sediment = 0.0f;
+
+    // Cache params locally for faster access
+    const float inertia = m_params.inertia;
+    const float oneMinusInertia = 1.0f - inertia;
+    const float sedimentCapacity = m_params.sedimentCapacity;
+    const float minSedimentCapacity = m_params.minSedimentCapacity;
+    const float depositSpeed = m_params.depositSpeed;
+    const float erodeSpeed = m_params.erodeSpeed;
+    const float evaporateSpeed = m_params.evaporateSpeed;
+    const float gravity = m_params.gravity;
+    const float evapMultiplier = 1.0f - evaporateSpeed;
+
+    // Calculate initial height and gradient (will be reused in next iteration)
+    auto current = calculateHeightAndGradient(posX, posY);
+
+    float* heightData = m_terrain->height->data();
 
     for (int lifetime = 0; lifetime < m_params.maxDropletLifetime; ++lifetime) {
         int nodeX = static_cast<int>(posX);
@@ -128,63 +208,83 @@ void HydraulicErosion::simulateDroplet() {
         float cellOffsetX = posX - nodeX;
         float cellOffsetY = posY - nodeY;
 
-        auto [height, gradX, gradY] = calculateHeightAndGradient(posX, posY);
+        // Update direction based on gradient (reusing cached values)
+        dirX = dirX * inertia - current.gradientX * oneMinusInertia;
+        dirY = dirY * inertia - current.gradientY * oneMinusInertia;
 
-        dirX = dirX * m_params.inertia - gradX * (1 - m_params.inertia);
-        dirY = dirY * m_params.inertia - gradY * (1 - m_params.inertia);
-
+        // Normalize direction
         float len = std::sqrt(dirX * dirX + dirY * dirY);
         if (len > 0.0001f) {
-            dirX /= len;
-            dirY /= len;
+            float invLen = 1.0f / len;
+            dirX *= invLen;
+            dirY *= invLen;
         }
 
         float newPosX = posX + dirX;
         float newPosY = posY + dirY;
 
+        // Check bounds
         if (newPosX < 0 || newPosX >= w - 1 || newPosY < 0 || newPosY >= h - 1) {
             break;
         }
 
-        float newHeight = calculateHeightAndGradient(newPosX, newPosY).height;
-        float deltaHeight = newHeight - height;
+        // Calculate new height (this becomes current for next iteration)
+        auto next = calculateHeightAndGradient(newPosX, newPosY);
+        float deltaHeight = next.height - current.height;
 
-        float capacity = std::max(-deltaHeight * speed * water * m_params.sedimentCapacity,
-                                   m_params.minSedimentCapacity);
+        // Calculate sediment capacity
+        float capacity = std::max(-deltaHeight * speed * water * sedimentCapacity,
+                                  minSedimentCapacity);
 
         if (sediment > capacity || deltaHeight > 0) {
+            // Deposit sediment
             float amountToDeposit = (deltaHeight > 0)
                 ? std::min(deltaHeight, sediment)
-                : (sediment - capacity) * m_params.depositSpeed;
+                : (sediment - capacity) * depositSpeed;
 
             sediment -= amountToDeposit;
 
             // Deposit using bilinear interpolation
-            m_terrain->height->at(nodeX, nodeY) += amountToDeposit * (1 - cellOffsetX) * (1 - cellOffsetY);
-            m_terrain->height->at(nodeX + 1, nodeY) += amountToDeposit * cellOffsetX * (1 - cellOffsetY);
-            m_terrain->height->at(nodeX, nodeY + 1) += amountToDeposit * (1 - cellOffsetX) * cellOffsetY;
-            m_terrain->height->at(nodeX + 1, nodeY + 1) += amountToDeposit * cellOffsetX * cellOffsetY;
+            float w00 = (1.0f - cellOffsetX) * (1.0f - cellOffsetY);
+            float w10 = cellOffsetX * (1.0f - cellOffsetY);
+            float w01 = (1.0f - cellOffsetX) * cellOffsetY;
+            float w11 = cellOffsetX * cellOffsetY;
+
+            heightData[nodeY * w + nodeX] += amountToDeposit * w00;
+            heightData[nodeY * w + nodeX + 1] += amountToDeposit * w10;
+            heightData[(nodeY + 1) * w + nodeX] += amountToDeposit * w01;
+            heightData[(nodeY + 1) * w + nodeX + 1] += amountToDeposit * w11;
         } else {
-            float amountToErode = std::min((capacity - sediment) * m_params.erodeSpeed, -deltaHeight);
+            // Erode terrain
+            float amountToErode = std::min((capacity - sediment) * erodeSpeed, -deltaHeight);
 
-            // Erode using brush
-            const auto& brushIndices = m_erosionBrushIndices[dropletIndex];
-            const auto& brushWeights = m_erosionBrushWeights[dropletIndex];
-
-            for (size_t i = 0; i < brushIndices.size(); ++i) {
-                float erodeAmount = amountToErode * brushWeights[i];
-                m_terrain->height->data()[brushIndices[i]] -= erodeAmount;
+            // Apply erosion using precomputed brush
+            const auto& brush = m_erosionBrush[dropletIndex];
+            const size_t brushSize = brush.indices.size();
+            for (size_t i = 0; i < brushSize; ++i) {
+                heightData[brush.indices[i]] -= amountToErode * brush.weights[i];
             }
 
             sediment += amountToErode;
         }
 
+        // Update position and reuse height calculation
         posX = newPosX;
         posY = newPosY;
-        speed = std::sqrt(std::max(0.0f, speed * speed + deltaHeight * m_params.gravity));
-        water *= (1 - m_params.evaporateSpeed);
+        current = next;  // Reuse calculated height for next iteration
+
+        // Update speed and water
+        speed = std::sqrt(std::max(0.0f, speed * speed + deltaHeight * gravity));
+        water *= evapMultiplier;
 
         if (water < 0.01f) break;
+    }
+}
+
+void HydraulicErosion::simulateDropletBatch(int /*startIdx*/, int count, Random& rng) {
+    // Simplified batch simulation for sequential execution
+    for (int i = 0; i < count; ++i) {
+        simulateDroplet(rng, 0, 0, 1);
     }
 }
 

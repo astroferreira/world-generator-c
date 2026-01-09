@@ -51,4 +51,36 @@ bool ImageExporter::exportRaw16(const Heightmap& heightmap, const std::string& f
     return true;
 }
 
+bool ImageExporter::exportWithWater(const TerrainData& terrain, const ColorMapper& colorMapper,
+                                     const std::string& filename) {
+    const size_t w = terrain.width();
+    const size_t h = terrain.heightDim();
+
+    std::vector<uint8_t> pixels(w * h * 4);
+
+    for (size_t y = 0; y < h; ++y) {
+        for (size_t x = 0; x < w; ++x) {
+            float height = terrain.height->get(x, y);
+            float waterDepth = terrain.water ? terrain.water->get(x, y) : 0.0f;
+            float iceThickness = 0.0f;
+            float snowDepth = 0.0f;
+
+            if (terrain.hydrology) {
+                iceThickness = terrain.hydrology->iceThickness->get(x, y);
+                snowDepth = terrain.hydrology->snowpack->get(x, y);
+            }
+
+            Color c = colorMapper.getColorWithWater(height, waterDepth, iceThickness, snowDepth);
+            size_t idx = (y * w + x) * 4;
+            pixels[idx + 0] = c.r;
+            pixels[idx + 1] = c.g;
+            pixels[idx + 2] = c.b;
+            pixels[idx + 3] = c.a;
+        }
+    }
+
+    return stbi_write_png(filename.c_str(), static_cast<int>(w), static_cast<int>(h),
+                          4, pixels.data(), static_cast<int>(w * 4)) != 0;
+}
+
 } // namespace worldgen

@@ -7,6 +7,14 @@ Tasks to improve the world generator towards extremely realistic, fractal-level-
 - [x] Multi-continent generation with procedural noise-based landmasses
 - [x] Adaptive sea-level calculation for target land ratio (~30%)
 - [x] Organic coastlines via domain warping
+- [x] Hydrology system with flow accumulation and river networks
+- [x] Lake formation in terrain depressions (priority-flood algorithm)
+- [x] Glacier system with elevation-based snow/ice
+- [x] Glacial meltwater contribution to rivers
+- [x] Seasonal water level variation (Spring/Summer/Autumn/Winter)
+- [x] Water/ice/snow rendering with depth-based coloring
+- [x] River channel erosion and sediment deposition
+- [x] Delta formation at river mouths
 
 ## Multi-Scale / Level of Detail
 
@@ -17,12 +25,13 @@ Tasks to improve the world generator towards extremely realistic, fractal-level-
 
 ## Erosion & Physical Simulations
 
-- [ ] Improve hydraulic erosion river formation (branching networks, meanders)
-- [ ] Add sediment deposition in floodplains and deltas
+- [x] Improve hydraulic erosion river formation (branching networks)
+- [x] Add sediment deposition in floodplains and deltas
+- [x] Basic glacial erosion under ice
 - [ ] Implement wind erosion simulation
 - [ ] Add aeolian dune formation (barchan, linear, star dunes)
 - [ ] Coastal erosion and wave-cut platforms
-- [ ] Glacial erosion (U-valleys, cirques, moraines)
+- [ ] Advanced glacial erosion (U-valleys, cirques, moraines)
 - [ ] Chemical weathering / karst terrain
 
 ## Geological Realism
@@ -35,10 +44,12 @@ Tasks to improve the world generator towards extremely realistic, fractal-level-
 
 ## Hydrology
 
-- [ ] Persistent river/lake system extraction from heightmap
-- [ ] Watershed and drainage basin calculation
+- [x] Persistent river/lake system extraction from heightmap
+- [x] Watershed and drainage basin calculation (flow accumulation)
 - [ ] Realistic coastlines with bays, fjords, estuaries
 - [ ] Underground water table affecting surface features
+- [ ] River meandering over time
+- [ ] Flooding simulation
 
 ## Biomes & Climate
 
@@ -66,5 +77,5 @@ Tasks to improve the world generator towards extremely realistic, fractal-level-
 
 1. Wind erosion + dune simulation (key differentiator for micro-detail)
 2. Quadtree LOD system (enables fractal zoom)
-3. Improved river network extraction
-4. 3D visualization for better evaluation
+3. 3D visualization for better evaluation
+4. River meandering and flooding dynamics

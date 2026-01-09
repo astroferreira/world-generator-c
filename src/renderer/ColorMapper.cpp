@@ -54,20 +54,69 @@ uint32_t ColorMapper::getColorARGB(float height) const {
     return getColor(height).toARGB();
 }
 
+Color ColorMapper::getColorWithWater(float height, float waterDepth,
+                                      float iceThickness, float snowDepth) const {
+    // Priority: ice > snow > water > terrain
+
+    if (iceThickness > 0.01f) {
+        // Glacier/ice coloring (white-blue)
+        float iceIntensity = clamp(iceThickness * 5.0f, 0.0f, 1.0f);
+        return {
+            static_cast<uint8_t>(180 + 70 * iceIntensity),
+            static_cast<uint8_t>(200 + 50 * iceIntensity),
+            static_cast<uint8_t>(230 + 25 * iceIntensity),
+            255
+        };
+    }
+
+    if (snowDepth > 0.005f) {
+        // Snow coloring (white with slight blue tint)
+        float snowIntensity = clamp(snowDepth * 12.0f, 0.0f, 1.0f);
+        return {
+            static_cast<uint8_t>(220 + 35 * snowIntensity),
+            static_cast<uint8_t>(220 + 35 * snowIntensity),
+            static_cast<uint8_t>(230 + 25 * snowIntensity),
+            255
+        };
+    }
+
+    if (waterDepth > 0.005f) {
+        // Water color based on depth - high contrast against green
+        float depthFactor = clamp(waterDepth * 1.5f, 0.0f, 1.0f);
+
+        // Bright cyan for shallow, deep blue for deep - contrasts well with green
+        Color shallowWater = {60, 160, 230, 255};
+        Color deepWater = {20, 60, 140, 255};
+
+        return Color::lerp(shallowWater, deepWater, depthFactor);
+    }
+
+    // No water/ice/snow - return normal terrain color
+    return getColor(height);
+}
+
 void ColorMapper::applyPreset(Preset preset) {
     clear();
 
     switch (preset) {
         case Preset::Terrain:
-            addStop(0.00f, {0, 0, 50, 255});       // Deep ocean
-            addStop(0.20f, {0, 50, 150, 255});     // Ocean
-            addStop(0.30f, {50, 150, 200, 255});   // Shallow water
-            addStop(0.32f, {240, 220, 150, 255}); // Beach
-            addStop(0.40f, {50, 150, 50, 255});   // Grass
-            addStop(0.55f, {30, 100, 30, 255});   // Forest
-            addStop(0.70f, {100, 80, 60, 255});   // Mountain rock
-            addStop(0.85f, {120, 120, 120, 255}); // High rock
-            addStop(1.00f, {255, 255, 255, 255}); // Snow
+            // Enhanced natural terrain palette
+            addStop(0.00f, {10, 30, 60, 255});      // Deep ocean (dark blue)
+            addStop(0.15f, {15, 50, 90, 255});      // Ocean
+            addStop(0.25f, {25, 80, 120, 255});     // Mid ocean
+            addStop(0.30f, {45, 120, 160, 255});    // Shallow water
+            addStop(0.32f, {200, 180, 140, 255});   // Beach (sand)
+            addStop(0.36f, {160, 180, 100, 255});   // Coastal grass
+            addStop(0.42f, {100, 160, 70, 255});    // Lowland grass
+            addStop(0.50f, {70, 135, 55, 255});     // Grass
+            addStop(0.58f, {55, 110, 45, 255});     // Forest
+            addStop(0.66f, {75, 95, 55, 255});      // Forest edge
+            addStop(0.72f, {110, 95, 70, 255});     // Foothills
+            addStop(0.78f, {130, 115, 90, 255});    // Mountain
+            addStop(0.84f, {150, 140, 125, 255});   // High rock
+            addStop(0.90f, {180, 175, 170, 255});   // Alpine
+            addStop(0.95f, {220, 220, 225, 255});   // Near snow
+            addStop(1.00f, {255, 255, 255, 255});   // Snow
             break;
 
         case Preset::Grayscale:

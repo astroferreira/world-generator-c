@@ -31,6 +31,9 @@ private:
     int m_iterations = 0;
     int m_changesLastStep = 0;
     std::vector<float> m_deltaBuffer;
+
+    // Thread-local delta buffers for lock-free parallel accumulation
+    std::vector<std::vector<float>> m_threadLocalDeltas;
 };
 
 } // namespace worldgen

@@ -28,6 +28,11 @@ public:
     Color getColor(float height) const;
     uint32_t getColorARGB(float height) const;
 
+    // Water-aware color mapping
+    Color getColorWithWater(float height, float waterDepth,
+                            float iceThickness = 0.0f,
+                            float snowDepth = 0.0f) const;
+
     void applyPreset(Preset preset);
 
     void buildLUT(size_t resolution = 4096);
