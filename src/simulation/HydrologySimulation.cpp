@@ -358,7 +358,7 @@ void HydrologySimulation::formLakes() {
 }
 
 //------------------------------------------------------------------------------
-// River Network - OPTIMIZED
+// River Network - Only shows water where it physically stays
 //------------------------------------------------------------------------------
 
 void HydrologySimulation::buildRiverNetwork() {
@@ -367,169 +367,95 @@ void HydrologySimulation::buildRiverNetwork() {
 
     auto& water = *m_terrain->water;
     const auto& flowAcc = *m_terrain->hydrology->flowAccumulation;
+    const auto& riverChannel = *m_terrain->hydrology->riverChannel;
+    const auto& lakeDepth = *m_terrain->hydrology->lakeDepth;
 
     float maxFlow = flowAcc.max();
-    float logMaxFlow = std::log(maxFlow + 1.0f);
     float seasonMult = getSeasonalMultiplier();
     float riverThreshold = maxFlow * m_params.riverThresholdRatio;
 
     const float* heightData = m_terrain->height->data();
     const float* flowData = flowAcc.data();
+    const float* channelData = riverChannel.data();
+    const float* lakeData = lakeDepth.data();
     float* waterData = water.data();
     const float seaLevel = m_params.seaLevel;
-    const float maxRiverWidth = m_params.maxRiverWidth;
-    const float baseRiverDepth = m_params.baseRiverDepth;
-    const float riverDepthScale = m_params.riverDepthScale;
 
-    // Phase 1: Calculate river properties in parallel (no writes to shared data)
-    struct RiverCell {
-        size_t x, y;
-        float width;
-        float depth;
-    };
-    std::vector<RiverCell> riverCells;
+    // Minimum channel depth required to show water (prevents water on slopes)
+    const float minChannelDepth = 0.001f;
 
-    // First, count river cells to pre-allocate
+    // Water only appears where it can physically stay:
+    // 1. In carved river channels (riverChannel > minChannelDepth)
+    // 2. In depressions/lakes (lakeDepth > 0)
+    // 3. At local minima where water pools
+
     #ifdef WORLDGEN_USE_OPENMP
-    std::vector<std::vector<RiverCell>> threadLocalRivers(omp_get_max_threads());
-
-    #pragma omp parallel
-    {
-        int tid = omp_get_thread_num();
-        auto& localRivers = threadLocalRivers[tid];
-
-        #pragma omp for schedule(static)
-        for (size_t y = 0; y < h; ++y) {
-            for (size_t x = 0; x < w; ++x) {
-                size_t idx = y * w + x;
-                float elevation = heightData[idx];
-                if (elevation < seaLevel) continue;
-
-                float flow = flowData[idx];
-                if (flow <= riverThreshold) continue;
-
-                float logFlow = std::log(flow + 1.0f);
-                float normalizedFlow = logFlow / logMaxFlow;
-
-                float riverWidth = normalizedFlow * maxRiverWidth;
-                float riverDepth = baseRiverDepth + normalizedFlow * riverDepthScale;
-                riverDepth *= seasonMult;
-
-                localRivers.push_back({x, y, riverWidth, riverDepth});
-            }
-        }
-    }
-
-    // Merge thread-local results
-    for (const auto& localRivers : threadLocalRivers) {
-        riverCells.insert(riverCells.end(), localRivers.begin(), localRivers.end());
-    }
-    #else
-    for (size_t y = 0; y < h; ++y) {
-        for (size_t x = 0; x < w; ++x) {
+    #pragma omp parallel for schedule(static)
+    #endif
+    for (size_t y = 1; y < h - 1; ++y) {
+        for (size_t x = 1; x < w - 1; ++x) {
             size_t idx = y * w + x;
             float elevation = heightData[idx];
-            if (elevation < seaLevel) continue;
+
+            // Skip underwater areas
+            if (elevation < seaLevel) {
+                waterData[idx] = 0.0f;
+                continue;
+            }
 
             float flow = flowData[idx];
-            if (flow <= riverThreshold) continue;
+            float channel = channelData[idx];
+            float lake = lakeData[idx];
 
-            float logFlow = std::log(flow + 1.0f);
-            float normalizedFlow = logFlow / logMaxFlow;
+            // Case 1: Lake/depression - water pools here
+            if (lake > 0.0f) {
+                waterData[idx] = std::min(lake, m_params.maxLakeDepth) * seasonMult;
+                continue;
+            }
 
-            float riverWidth = normalizedFlow * maxRiverWidth;
-            float riverDepth = baseRiverDepth + normalizedFlow * riverDepthScale;
-            riverDepth *= seasonMult;
+            // Case 2: Carved channel with sufficient flow
+            if (channel > minChannelDepth && flow > riverThreshold) {
+                // Water depth proportional to channel depth and flow
+                float flowFactor = std::min(1.0f, flow / (maxFlow * 0.1f));
+                float waterDepth = channel * flowFactor * seasonMult;
+                waterData[idx] = std::min(waterDepth, channel);  // Can't exceed channel depth
+                continue;
+            }
 
-            riverCells.push_back({x, y, riverWidth, riverDepth});
-        }
-    }
-    #endif
+            // Case 3: Check if this is a local minimum (water would pool)
+            if (flow > riverThreshold * 10.0f) {  // Only for significant flow
+                float centerHeight = elevation;
+                bool isLocalMin = true;
+                float minNeighborHeight = centerHeight;
 
-    // Phase 2: Expand rivers with atomic max operations
-    // Use thread-local water buffers to avoid contention
-    #ifdef WORLDGEN_USE_OPENMP
-    const int numThreads = omp_get_max_threads();
-    std::vector<std::vector<float>> threadWater(numThreads);
-    for (auto& tw : threadWater) {
-        tw.resize(w * h, 0.0f);
-    }
+                // Check 8 neighbors
+                for (int dy = -1; dy <= 1 && isLocalMin; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (dx == 0 && dy == 0) continue;
+                        size_t nidx = (y + dy) * w + (x + dx);
+                        float neighborHeight = heightData[nidx];
+                        if (neighborHeight < centerHeight) {
+                            isLocalMin = false;
+                            break;
+                        }
+                        minNeighborHeight = std::min(minNeighborHeight, neighborHeight);
+                    }
+                }
 
-    #pragma omp parallel
-    {
-        int tid = omp_get_thread_num();
-        float* localWater = threadWater[tid].data();
-
-        #pragma omp for schedule(dynamic, 256)
-        for (size_t i = 0; i < riverCells.size(); ++i) {
-            const auto& rc = riverCells[i];
-            int radius = static_cast<int>(rc.width);
-
-            for (int dy = -radius; dy <= radius; ++dy) {
-                for (int dx = -radius; dx <= radius; ++dx) {
-                    float dist = std::sqrt(static_cast<float>(dx*dx + dy*dy));
-                    if (dist > rc.width) continue;
-
-                    int nx = static_cast<int>(rc.x) + dx;
-                    int ny = static_cast<int>(rc.y) + dy;
-
-                    if (nx < 0 || nx >= static_cast<int>(w) ||
-                        ny < 0 || ny >= static_cast<int>(h)) continue;
-
-                    size_t nidx = ny * w + nx;
-                    if (heightData[nidx] < seaLevel) continue;
-
-                    float falloff = 1.0f - (dist / (rc.width + 1.0f));
-                    float localDepth = rc.depth * falloff;
-
-                    if (localDepth > localWater[nidx]) {
-                        localWater[nidx] = localDepth;
+                if (isLocalMin) {
+                    // Pool depth is difference to lowest neighbor that would overflow
+                    float poolDepth = minNeighborHeight - centerHeight;
+                    if (poolDepth > 0.001f) {
+                        waterData[idx] = std::min(poolDepth, 0.1f) * seasonMult;
+                        continue;
                     }
                 }
             }
+
+            // No valid water location - clear any existing water
+            waterData[idx] = 0.0f;
         }
     }
-
-    // Reduce thread-local water to main buffer
-    #pragma omp parallel for schedule(static)
-    for (size_t i = 0; i < w * h; ++i) {
-        float maxWater = waterData[i];
-        for (int t = 0; t < numThreads; ++t) {
-            if (threadWater[t][i] > maxWater) {
-                maxWater = threadWater[t][i];
-            }
-        }
-        waterData[i] = maxWater;
-    }
-    #else
-    // Sequential version
-    for (const auto& rc : riverCells) {
-        int radius = static_cast<int>(rc.width);
-
-        for (int dy = -radius; dy <= radius; ++dy) {
-            for (int dx = -radius; dx <= radius; ++dx) {
-                float dist = std::sqrt(static_cast<float>(dx*dx + dy*dy));
-                if (dist > rc.width) continue;
-
-                int nx = static_cast<int>(rc.x) + dx;
-                int ny = static_cast<int>(rc.y) + dy;
-
-                if (nx < 0 || nx >= static_cast<int>(w) ||
-                    ny < 0 || ny >= static_cast<int>(h)) continue;
-
-                size_t nidx = ny * w + nx;
-                if (heightData[nidx] < seaLevel) continue;
-
-                float falloff = 1.0f - (dist / (rc.width + 1.0f));
-                float localDepth = rc.depth * falloff;
-
-                if (localDepth > waterData[nidx]) {
-                    waterData[nidx] = localDepth;
-                }
-            }
-        }
-    }
-    #endif
 }
 
 //------------------------------------------------------------------------------
