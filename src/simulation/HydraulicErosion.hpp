@@ -11,7 +11,7 @@
 namespace worldgen {
 
 struct HydraulicParams {
-    int dropletsPerStep = 50000;
+    int dropletsPerStep = 200000;
     int maxDropletLifetime = 30;
     float inertia = 0.05f;
     float sedimentCapacity = 4.0f;
