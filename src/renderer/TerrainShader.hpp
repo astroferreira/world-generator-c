@@ -3,6 +3,7 @@
 #include "terrain/Heightmap.hpp"
 #include <cmath>
 #include <algorithm>
+#include <cstdint>
 
 namespace worldgen {
 

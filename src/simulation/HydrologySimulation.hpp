@@ -63,6 +63,11 @@ private:
     void formDeltas();
     void updateSeasonalFlow();
 
+    // Groundwater / baseflow system (sustains rivers)
+    void updateGroundwater();
+    void calculateBaseflow();
+    void initializeChannelsFromFlow();
+
     // Helpers
     FlowDirection findSteepestDescent(size_t x, size_t y) const;
     float getEffectiveElevation(size_t x, size_t y) const;

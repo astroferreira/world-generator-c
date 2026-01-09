@@ -94,9 +94,15 @@ void Application::run() {
         if (m_simulationRunning && !m_simManager.isComplete()) {
             for (int i = 0; i < m_config.simulationStepsPerFrame; ++i) {
                 m_simManager.step();
+                m_totalSimulationSteps++;
             }
             m_needsRedraw = true;
             updateTitle();
+
+            // Auto-export at regular intervals
+            if (m_autoExportEnabled) {
+                autoExport();
+            }
         }
 
         if (m_needsRedraw) {
@@ -113,6 +119,10 @@ void Application::run() {
 
 void Application::generateTerrain() {
     std::cout << "Generating terrain (seed: " << m_seed << ")..." << std::endl;
+
+    // Reset auto-export state
+    m_totalSimulationSteps = 0;
+    m_lastExportStep = 0;
 
     TerrainGenConfig config;
     config.width = m_config.terrainWidth;
@@ -366,6 +376,34 @@ void Application::updateTitle() {
     }
 
     m_window->setTitle(title.str());
+}
+
+void Application::autoExport() {
+    // Export 3D view at regular intervals during simulation
+    int stepsSinceLastExport = m_totalSimulationSteps - m_lastExportStep;
+
+    if (stepsSinceLastExport >= m_autoExportInterval) {
+        m_lastExportStep = m_totalSimulationSteps;
+
+        // Build filename with step count and simulation info
+        std::ostringstream filename;
+        filename << "simulation_step_" << m_totalSimulationSteps;
+
+        // Add current simulation name if available
+        if (auto* sim = m_simManager.current()) {
+            filename << "_" << sim->name();
+        }
+        filename << ".png";
+
+        // Render to texture first (in case we're in 2D mode)
+        if (m_obliqueRenderer) {
+            m_obliqueRenderer->renderToTexture(m_terrain, m_colorMapper);
+
+            if (m_obliqueRenderer->exportToPNG(filename.str())) {
+                std::cout << "Auto-exported: " << filename.str() << std::endl;
+            }
+        }
+    }
 }
 
 } // namespace worldgen

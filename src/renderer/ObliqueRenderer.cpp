@@ -1,5 +1,10 @@
 #include "renderer/ObliqueRenderer.hpp"
 #include <algorithm>
+#include <vector>
+#include <string>
+
+// Just include for PNG export - implementation is in ImageExporter.cpp
+#include "stb/stb_image_write.h"
 
 #ifdef WORLDGEN_USE_OPENMP
 #include <omp.h>
@@ -181,6 +186,24 @@ void ObliqueRenderer::render(const TerrainData& terrain, const ColorMapper& colo
 
 void ObliqueRenderer::display(const SDL_Rect& destRect) {
     SDL_RenderCopy(m_renderer, m_texture, nullptr, &destRect);
+}
+
+bool ObliqueRenderer::exportToPNG(const std::string& filename) const {
+    // Convert ARGB to RGB for PNG export
+    std::vector<uint8_t> rgb(m_width * m_height * 3);
+
+    for (size_t i = 0; i < m_pixels.size(); ++i) {
+        uint32_t pixel = m_pixels[i];
+        rgb[i * 3 + 0] = (pixel >> 16) & 0xFF;  // R
+        rgb[i * 3 + 1] = (pixel >> 8) & 0xFF;   // G
+        rgb[i * 3 + 2] = pixel & 0xFF;          // B
+    }
+
+    return stbi_write_png(filename.c_str(),
+                          static_cast<int>(m_width),
+                          static_cast<int>(m_height),
+                          3, rgb.data(),
+                          static_cast<int>(m_width * 3)) != 0;
 }
 
 } // namespace worldgen

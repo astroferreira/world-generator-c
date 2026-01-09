@@ -32,6 +32,9 @@ public:
     // Display the rendered texture
     void display(const SDL_Rect& destRect);
 
+    // Export pixel buffer to PNG file
+    bool exportToPNG(const std::string& filename) const;
+
     // Configuration
     Config& config() { return m_config; }
     const Config& config() const { return m_config; }

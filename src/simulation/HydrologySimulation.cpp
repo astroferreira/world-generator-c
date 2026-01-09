@@ -51,6 +51,8 @@ void HydrologySimulation::step() {
             recalculateFlowNetwork();
         } else {
             // Lighter update - dynamics only
+            updateGroundwater();      // Accumulate groundwater from infiltration
+            calculateBaseflow();      // Discharge groundwater to channels
             erodeRiverChannels();
             depositSediment();
             formDeltas();
@@ -74,6 +76,15 @@ void HydrologySimulation::recalculateFlowNetwork() {
     addRainfall();
     addSpringFlow();
     calculateFlowAccumulation();
+
+    // Initialize river channels based on flow accumulation
+    // This provides immediate channel structure for water to appear in
+    initializeChannelsFromFlow();
+
+    // Groundwater system - sustains rivers between rain events
+    updateGroundwater();
+    calculateBaseflow();
+
     formLakes();
     buildRiverNetwork();
 }
@@ -359,6 +370,7 @@ void HydrologySimulation::formLakes() {
 
 //------------------------------------------------------------------------------
 // River Network - Only shows water where it physically stays
+// Now includes baseflow contribution from groundwater system
 //------------------------------------------------------------------------------
 
 void HydrologySimulation::buildRiverNetwork() {
@@ -369,6 +381,7 @@ void HydrologySimulation::buildRiverNetwork() {
     const auto& flowAcc = *m_terrain->hydrology->flowAccumulation;
     const auto& riverChannel = *m_terrain->hydrology->riverChannel;
     const auto& lakeDepth = *m_terrain->hydrology->lakeDepth;
+    const auto& baseflow = *m_terrain->hydrology->baseflow;
 
     float maxFlow = flowAcc.max();
     float seasonMult = getSeasonalMultiplier();
@@ -378,16 +391,18 @@ void HydrologySimulation::buildRiverNetwork() {
     const float* flowData = flowAcc.data();
     const float* channelData = riverChannel.data();
     const float* lakeData = lakeDepth.data();
+    const float* baseflowData = baseflow.data();
     float* waterData = water.data();
     const float seaLevel = m_params.seaLevel;
 
     // Minimum channel depth required to show water (prevents water on slopes)
-    const float minChannelDepth = 0.001f;
+    const float minChannelDepth = 0.0005f;  // Reduced for earlier visibility
 
     // Water only appears where it can physically stay:
     // 1. In carved river channels (riverChannel > minChannelDepth)
     // 2. In depressions/lakes (lakeDepth > 0)
     // 3. At local minima where water pools
+    // 4. NEW: Where baseflow from groundwater sustains rivers
 
     #ifdef WORLDGEN_USE_OPENMP
     #pragma omp parallel for schedule(static)
@@ -406,6 +421,7 @@ void HydrologySimulation::buildRiverNetwork() {
             float flow = flowData[idx];
             float channel = channelData[idx];
             float lake = lakeData[idx];
+            float bf = baseflowData[idx];
 
             // Case 1: Lake/depression - water pools here
             if (lake > 0.0f) {
@@ -413,17 +429,39 @@ void HydrologySimulation::buildRiverNetwork() {
                 continue;
             }
 
-            // Case 2: Carved channel with sufficient flow
+            // Case 2: River channel with flow or baseflow
+            // Water appears if there's a channel AND (surface flow OR groundwater baseflow)
             if (channel > minChannelDepth && flow > riverThreshold) {
-                // Water depth proportional to channel depth and flow
+                // Water depth based on:
+                // 1. Channel capacity
+                // 2. Flow accumulation (surface runoff)
+                // 3. Baseflow contribution (groundwater discharge)
                 float flowFactor = std::min(1.0f, flow / (maxFlow * 0.1f));
-                float waterDepth = channel * flowFactor * seasonMult;
-                waterData[idx] = std::min(waterDepth, channel);  // Can't exceed channel depth
+
+                // Baseflow provides sustained water even when surface flow is low
+                // This is why rivers don't dry up between rain events
+                float baseflowContribution = bf * 5.0f;  // Amplify baseflow for visibility
+
+                float waterDepth = channel * (flowFactor + baseflowContribution) * seasonMult;
+
+                // Cap at channel depth but ensure minimum visibility for rivers
+                waterDepth = std::min(waterDepth, channel * 1.5f);
+                waterDepth = std::max(waterDepth, channel * 0.3f);  // Minimum 30% of channel
+
+                waterData[idx] = waterDepth;
+                continue;
+            }
+
+            // Case 2b: Baseflow alone can sustain water in channels
+            // Even without significant surface flow, groundwater can maintain rivers
+            if (channel > minChannelDepth && bf > 0.001f) {
+                float waterDepth = std::min(bf * 3.0f, channel) * seasonMult;
+                waterData[idx] = waterDepth;
                 continue;
             }
 
             // Case 3: Check if this is a local minimum (water would pool)
-            if (flow > riverThreshold * 10.0f) {  // Only for significant flow
+            if (flow > riverThreshold * 5.0f) {  // Reduced threshold for more pooling
                 float centerHeight = elevation;
                 bool isLocalMin = true;
                 float minNeighborHeight = centerHeight;
@@ -445,8 +483,8 @@ void HydrologySimulation::buildRiverNetwork() {
                 if (isLocalMin) {
                     // Pool depth is difference to lowest neighbor that would overflow
                     float poolDepth = minNeighborHeight - centerHeight;
-                    if (poolDepth > 0.001f) {
-                        waterData[idx] = std::min(poolDepth, 0.1f) * seasonMult;
+                    if (poolDepth > 0.0005f) {
+                        waterData[idx] = std::min(poolDepth, 0.15f) * seasonMult;
                         continue;
                     }
                 }
@@ -631,6 +669,197 @@ void HydrologySimulation::advanceSeason() {
 void HydrologySimulation::setSeason(Season season) {
     if (m_terrain && m_terrain->hydrology) {
         m_terrain->hydrology->currentSeason = season;
+    }
+}
+
+//------------------------------------------------------------------------------
+// Groundwater / Baseflow System
+// Based on real hydrology: precipitation infiltrates into soil, stored in
+// aquifers, and slowly discharges to maintain river flow (baseflow)
+//------------------------------------------------------------------------------
+
+void HydrologySimulation::updateGroundwater() {
+    const size_t w = m_terrain->width();
+    const size_t h = m_terrain->heightDim();
+
+    auto& groundwater = *m_terrain->hydrology->groundwater;
+    const auto& flowAcc = *m_terrain->hydrology->flowAccumulation;
+    const float* heightData = m_terrain->height->data();
+    float* gwData = groundwater.data();
+
+    const float infiltration = m_params.infiltrationRate;
+    const float capacity = m_params.aquiferCapacity;
+    const float permeability = m_params.permeability;
+    const float seasonMult = getSeasonalMultiplier();
+
+    // Calculate max flow for normalization
+    float maxFlow = flowAcc.max();
+    if (maxFlow < 0.001f) maxFlow = 0.001f;
+
+    #ifdef WORLDGEN_USE_OPENMP
+    #pragma omp parallel for schedule(static)
+    #endif
+    for (size_t y = 1; y < h - 1; ++y) {
+        for (size_t x = 1; x < w - 1; ++x) {
+            size_t idx = y * w + x;
+
+            // Infiltration: rainfall that soaks into ground
+            // More infiltration in areas with higher flow (more rainfall upstream)
+            float localFlow = flowAcc.get(x, y);
+            float flowRatio = localFlow / maxFlow;
+
+            // Infiltration proportional to local precipitation/runoff
+            // Higher terrain = more rainfall = more infiltration potential
+            float elev = heightData[idx];
+            float recharge = infiltration * (m_params.baseRainfall + elev * m_params.elevationRainfallBonus);
+            recharge *= seasonMult;
+
+            // Add to groundwater storage
+            float currentGW = gwData[idx];
+            float newGW = currentGW + recharge;
+
+            // Lateral flow: groundwater flows from high to low areas (simplified)
+            // This helps accumulate groundwater in valleys
+            float centerElev = elev;
+            float lateralIn = 0.0f;
+            int neighborCount = 0;
+
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (dx == 0 && dy == 0) continue;
+                    size_t nidx = (y + dy) * w + (x + dx);
+                    float neighborElev = heightData[nidx];
+                    float neighborGW = gwData[nidx];
+
+                    // Water flows from higher to lower ground
+                    if (neighborElev > centerElev) {
+                        float gradient = (neighborElev - centerElev);
+                        lateralIn += neighborGW * gradient * permeability * 0.1f;
+                    }
+                    neighborCount++;
+                }
+            }
+
+            newGW += lateralIn / neighborCount;
+
+            // Cap at aquifer capacity
+            gwData[idx] = std::min(newGW, capacity);
+        }
+    }
+}
+
+void HydrologySimulation::calculateBaseflow() {
+    const size_t w = m_terrain->width();
+    const size_t h = m_terrain->heightDim();
+
+    auto& groundwater = *m_terrain->hydrology->groundwater;
+    auto& baseflow = *m_terrain->hydrology->baseflow;
+    auto& riverChannel = *m_terrain->hydrology->riverChannel;
+    const auto& flowAcc = *m_terrain->hydrology->flowAccumulation;
+    const float* heightData = m_terrain->height->data();
+
+    const float baseflowRate = m_params.baseflowRate;
+    const float riverThreshold = flowAcc.max() * m_params.riverThresholdRatio;
+
+    float* gwData = groundwater.data();
+    float* bfData = baseflow.data();
+    float* channelData = riverChannel.data();
+
+    #ifdef WORLDGEN_USE_OPENMP
+    #pragma omp parallel for schedule(static)
+    #endif
+    for (size_t y = 1; y < h - 1; ++y) {
+        for (size_t x = 1; x < w - 1; ++x) {
+            size_t idx = y * w + x;
+
+            float gw = gwData[idx];
+            float flow = flowAcc.get(x, y);
+            float channel = channelData[idx];
+
+            // Baseflow discharge: groundwater releases into channels
+            // Higher discharge where:
+            // 1. There is significant flow accumulation (river locations)
+            // 2. Terrain is lower (valleys, where water table intersects surface)
+            // 3. Channels have been carved (erosion has exposed aquifer)
+
+            float discharge = 0.0f;
+
+            if (flow > riverThreshold) {
+                // River location - groundwater discharges here
+                // Discharge rate proportional to groundwater storage and channel depth
+                float channelFactor = 1.0f + channel * 10.0f;  // Deeper channels = more exposure
+                discharge = gw * baseflowRate * channelFactor;
+
+                // Remove discharged water from aquifer
+                gwData[idx] = std::max(0.0f, gw - discharge);
+            }
+
+            // Valley bottoms (local minima) also receive baseflow
+            float centerElev = heightData[idx];
+            bool isValley = true;
+            for (int dy = -1; dy <= 1 && isValley; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (dx == 0 && dy == 0) continue;
+                    size_t nidx = (y + dy) * w + (x + dx);
+                    if (heightData[nidx] < centerElev) {
+                        isValley = false;
+                        break;
+                    }
+                }
+            }
+
+            if (isValley && gw > 0.01f) {
+                float valleyDischarge = gw * baseflowRate * 0.5f;
+                discharge += valleyDischarge;
+                gwData[idx] = std::max(0.0f, gwData[idx] - valleyDischarge);
+            }
+
+            bfData[idx] = discharge;
+        }
+    }
+}
+
+void HydrologySimulation::initializeChannelsFromFlow() {
+    // Create initial channel depths based on flow accumulation
+    // This allows rivers to appear immediately rather than waiting for erosion
+    // Based on the hydrological principle that larger catchments = deeper channels
+
+    const size_t w = m_terrain->width();
+    const size_t h = m_terrain->heightDim();
+
+    auto& riverChannel = *m_terrain->hydrology->riverChannel;
+    const auto& flowAcc = *m_terrain->hydrology->flowAccumulation;
+
+    float maxFlow = flowAcc.max();
+    if (maxFlow < 0.001f) return;
+
+    const float riverThreshold = maxFlow * m_params.riverThresholdRatio;
+    const float channelFactor = m_params.initialChannelFactor;
+    const float minChannel = m_params.minBaseflowChannel;
+
+    float* channelData = riverChannel.data();
+    const float* flowData = flowAcc.data();
+
+    #ifdef WORLDGEN_USE_OPENMP
+    #pragma omp parallel for schedule(static)
+    #endif
+    for (size_t i = 0; i < w * h; ++i) {
+        float flow = flowData[i];
+
+        if (flow > riverThreshold) {
+            // Channel depth scales with flow (catchment area)
+            // Using power law: depth ~ flow^0.4 (based on hydraulic geometry)
+            float normalizedFlow = flow / maxFlow;
+            float channelDepth = std::pow(normalizedFlow, 0.4f) * channelFactor;
+
+            // Ensure minimum channel for baseflow
+            channelDepth = std::max(channelDepth, minChannel);
+
+            // Only increase channel, don't decrease (erosion is cumulative)
+            if (channelDepth > channelData[i]) {
+                channelData[i] = channelDepth;
+            }
+        }
     }
 }
 

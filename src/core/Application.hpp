@@ -64,6 +64,12 @@ private:
     int m_seed = 42;
     ViewMode m_viewMode = ViewMode::TopDown;
 
+    // Auto-export settings for unattended simulation monitoring
+    bool m_autoExportEnabled = true;
+    int m_autoExportInterval = 50;    // Export every N simulation steps
+    int m_lastExportStep = 0;
+    int m_totalSimulationSteps = 0;
+
     // Zoom and pan state
     float m_zoomLevel = 1.0f;
     float m_viewOffsetX = 0.0f;
@@ -78,6 +84,7 @@ private:
     void render();
     void updateTitle();
     void printHelp();
+    void autoExport();
 };
 
 } // namespace worldgen

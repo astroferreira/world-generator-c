@@ -40,7 +40,7 @@ struct TerrainGenConfig {
 
 class TerrainGenerator {
 public:
-    using ProgressCallback = std::function<void(float progress, const std::string& stage)>;
+    using ProgressCallback = std::function<void(float progress, const char* stage)>;
 
     TerrainGenerator();
     explicit TerrainGenerator(const TerrainGenConfig& config);

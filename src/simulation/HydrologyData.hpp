@@ -75,21 +75,32 @@ struct HydrologyParams {
     float autumnMultiplier = 1.0f;
     float winterMultiplier = 0.3f;
 
-    // Rainfall
-    float baseRainfall = 0.01f;
-    float elevationRainfallBonus = 0.02f;
+    // Rainfall - increased for realistic precipitation
+    float baseRainfall = 0.05f;              // Increased: base rainfall (was 0.01)
+    float elevationRainfallBonus = 0.08f;    // Increased: orographic effect (was 0.02)
 
-    // Springs
-    float springElevationMin = 0.4f;
-    float springElevationMax = 0.7f;
-    float springFlowRate = 0.05f;
-    float springDensity = 0.0005f;
+    // Springs - increased for sustained river sources
+    float springElevationMin = 0.35f;        // Lower minimum (was 0.4)
+    float springElevationMax = 0.75f;        // Higher maximum (was 0.7)
+    float springFlowRate = 0.2f;             // Increased: stronger springs (was 0.05)
+    float springDensity = 0.003f;            // Increased: more springs (was 0.0005)
+
+    // Groundwater / Baseflow - NEW: sustains rivers between rain events
+    // Based on real hydrology: water infiltrates, stored in aquifers, slowly released
+    float infiltrationRate = 0.4f;           // Fraction of rainfall that infiltrates (0-1)
+    float baseflowRate = 0.02f;              // Rate groundwater discharges to channels per step
+    float aquiferCapacity = 1.0f;            // Maximum groundwater storage
+    float permeability = 0.5f;               // How easily groundwater flows laterally
 
     // River dynamics
-    float channelErosionRate = 0.0005f;
+    float channelErosionRate = 0.002f;       // Increased: faster channel carving (was 0.0005)
     float sedimentDepositionRate = 0.001f;
     float meanderStrength = 0.05f;
     float deltaFormationRate = 0.003f;
+
+    // Channel initialization - NEW: initial channel depth based on flow
+    float initialChannelFactor = 0.3f;       // Fraction of flow-based channel to create immediately
+    float minBaseflowChannel = 0.002f;       // Minimum channel for baseflow display
 
     // Continuous mode - recalculate flow network as terrain changes
     int recalculateInterval = 5;  // Recalculate full flow network every N steps
@@ -139,6 +150,10 @@ struct HydrologyState {
     std::unique_ptr<Heightmap> snowpack;
     std::unique_ptr<Heightmap> meltwater;
 
+    // Groundwater system - stores infiltrated water that sustains rivers
+    std::unique_ptr<Heightmap> groundwater;  // Aquifer storage
+    std::unique_ptr<Heightmap> baseflow;     // Discharge rate to surface
+
     Season currentSeason = Season::Spring;
     float seasonProgress = 0.0f;
     int yearCount = 0;
@@ -152,6 +167,8 @@ struct HydrologyState {
         state.iceThickness = std::make_unique<Heightmap>(width, height);
         state.snowpack = std::make_unique<Heightmap>(width, height);
         state.meltwater = std::make_unique<Heightmap>(width, height);
+        state.groundwater = std::make_unique<Heightmap>(width, height);
+        state.baseflow = std::make_unique<Heightmap>(width, height);
         return state;
     }
 };
