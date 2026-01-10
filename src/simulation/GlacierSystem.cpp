@@ -394,7 +394,7 @@ void GlacierSystem::erodeUnderGlaciers() {
 }
 
 //------------------------------------------------------------------------------
-// Meltwater Contribution
+// Meltwater Contribution - Enhanced with downstream tracing for visible streams
 //------------------------------------------------------------------------------
 
 void GlacierSystem::contributeMeltwater() {
@@ -403,6 +403,7 @@ void GlacierSystem::contributeMeltwater() {
 
     const auto& meltwater = *m_terrain->hydrology->meltwater;
     const float* meltData = meltwater.data();
+    const float meltFlowMultiplier = 15.0f;  // Strong contribution to flow
 
     // Add meltwater to flow accumulation
     if (m_terrain->hydrology->flowAccumulation) {
@@ -413,12 +414,12 @@ void GlacierSystem::contributeMeltwater() {
         for (size_t i = 0; i < w * h; ++i) {
             float melt = meltData[i];
             if (melt > 0.0f) {
-                flowData[i] += melt * 10.0f;
+                flowData[i] += melt * meltFlowMultiplier;
             }
         }
     }
 
-    // Add to water for visibility
+    // Add to water for visibility at source
     float* waterData = m_terrain->water->data();
     #ifdef WORLDGEN_USE_OPENMP
     #pragma omp parallel for schedule(static)
@@ -427,6 +428,101 @@ void GlacierSystem::contributeMeltwater() {
         float melt = meltData[i];
         if (melt > 0.001f) {
             waterData[i] += melt * 0.5f;
+        }
+    }
+
+    // Trace meltwater downstream to create visible meltwater streams
+    // This ensures meltwater is visible as it flows down from glaciers/snowpack
+    if (!m_terrain->hydrology->flowDirection || !m_terrain->hydrology->riverChannel) {
+        return;
+    }
+
+    const float* flowDirData = m_terrain->hydrology->flowDirection->data();
+    float* channelData = m_terrain->hydrology->riverChannel->data();
+    const float* heightData = m_terrain->height->data();
+
+    // Direction offsets (D8)
+    const int dx[8] = { 0,  1, 1, 1, 0, -1, -1, -1};
+    const int dy[8] = {-1, -1, 0, 1, 1,  1,  0, -1};
+
+    // Find significant meltwater sources and trace them downstream
+    // Process sequentially to avoid race conditions on channel accumulation
+    std::vector<std::pair<size_t, float>> meltSources;
+    for (size_t y = 1; y < h - 1; ++y) {
+        for (size_t x = 1; x < w - 1; ++x) {
+            size_t idx = y * w + x;
+            float melt = meltData[idx];
+            if (melt > 0.002f) {  // Significant melt threshold
+                meltSources.push_back({idx, melt});
+            }
+        }
+    }
+
+    // Sort by elevation (highest first) for proper downstream propagation
+    std::sort(meltSources.begin(), meltSources.end(),
+              [heightData](const std::pair<size_t, float>& a, const std::pair<size_t, float>& b) {
+                  return heightData[a.first] > heightData[b.first];
+              });
+
+    // Trace each meltwater source downstream
+    for (const auto& source : meltSources) {
+        size_t idx = source.first;
+        float meltAmount = source.second;
+
+        // Trace downstream, accumulating visibility
+        const int maxSteps = 200;  // Limit trace length
+        float accumulatedMelt = meltAmount;
+
+        for (int step = 0; step < maxSteps; ++step) {
+            size_t x = idx % w;
+            size_t y = idx / w;
+
+            // Add to channel visibility based on accumulated melt
+            float channelDepth = accumulatedMelt * 0.02f;  // Scale for visibility
+            channelData[idx] = std::max(channelData[idx], channelDepth);
+
+            // Add to water for direct visibility
+            waterData[idx] += accumulatedMelt * 0.1f;
+
+            // Get flow direction
+            uint8_t flowDir = static_cast<uint8_t>(flowDirData[idx]);
+            if (flowDir == 0) break;  // No flow direction (pit or boundary)
+
+            // Find the direction bit
+            int dirIdx = -1;
+            for (int d = 0; d < 8; ++d) {
+                if (flowDir & (1 << d)) {
+                    dirIdx = d;
+                    break;
+                }
+            }
+            if (dirIdx < 0) break;
+
+            // Move to next cell
+            int nx = static_cast<int>(x) + dx[dirIdx];
+            int ny = static_cast<int>(y) + dy[dirIdx];
+
+            if (nx < 1 || nx >= static_cast<int>(w) - 1 ||
+                ny < 1 || ny >= static_cast<int>(h) - 1) {
+                break;  // Reached boundary
+            }
+
+            size_t nextIdx = ny * w + nx;
+
+            // Check if we're below snowline (stop tracing when we merge with regular rivers)
+            if (heightData[nextIdx] < m_params.snowlineElevation * 0.8f) {
+                break;  // Merged with lower-elevation hydrology
+            }
+
+            // Accumulate any additional meltwater at this cell
+            accumulatedMelt += meltData[nextIdx] * 0.5f;
+
+            // Decay slightly as we flow downstream
+            accumulatedMelt *= 0.98f;
+
+            if (accumulatedMelt < 0.0001f) break;  // Faded out
+
+            idx = nextIdx;
         }
     }
 }

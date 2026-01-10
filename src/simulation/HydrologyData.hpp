@@ -3,8 +3,16 @@
 #include "terrain/Heightmap.hpp"
 #include <memory>
 #include <cstdint>
+#include <vector>
 
 namespace worldgen {
+
+// Persistent spring location for spring network
+struct SpringLocation {
+    size_t x, y;
+    float flowRate;   // Base flow rate (modified by season)
+    float quality;    // Terrain suitability score (0-1)
+};
 
 // Flow direction encoding (D8 algorithm)
 enum class FlowDirection : uint8_t {
@@ -85,12 +93,25 @@ struct HydrologyParams {
     float springFlowRate = 0.2f;             // Increased: stronger springs (was 0.05)
     float springDensity = 0.003f;            // Increased: more springs (was 0.0005)
 
-    // Groundwater / Baseflow - NEW: sustains rivers between rain events
-    // Based on real hydrology: water infiltrates, stored in aquifers, slowly released
-    float infiltrationRate = 0.4f;           // Fraction of rainfall that infiltrates (0-1)
-    float baseflowRate = 0.02f;              // Rate groundwater discharges to channels per step
-    float aquiferCapacity = 1.0f;            // Maximum groundwater storage
-    float permeability = 0.5f;               // How easily groundwater flows laterally
+    // Spring network - terrain-aware spring placement
+    float springCurvatureWeight = 0.4f;      // Prefer valleys (concave terrain)
+    float springFlowAccumWeight = 0.3f;      // Prefer convergent flow areas
+    float springSlopeWeight = 0.2f;          // Prefer gentle slopes
+    float springElevationWeight = 0.1f;      // Elevation band preference
+    int maxSprings = 500;                    // Maximum number of springs
+    float springMinSpacing = 10.0f;          // Minimum pixels between springs
+
+    // Wind and rain shadow
+    float windDirection = 270.0f;            // Azimuth in degrees (270 = from west)
+    float rainShadowStrength = 0.6f;         // Max rainfall reduction behind mountains (0-1)
+    float rainShadowDistance = 50.0f;        // How far upwind to sample (pixels)
+    float moistureDepletionRate = 0.02f;     // Moisture lost per unit elevation climbed
+
+    // Water particle lifetime - water is lost through erosion and evaporation
+    float waterLifetimeBase = 100.0f;        // Base lifetime in simulation steps
+    float evaporationRate = 0.02f;           // Water lost per step due to evaporation
+    float erosionWaterLoss = 0.1f;           // Water consumed per unit of erosion
+    float temperatureEvapBonus = 0.5f;       // Extra evap at low elevation (warmer)
 
     // River dynamics
     float channelErosionRate = 0.002f;       // Increased: faster channel carving (was 0.0005)
@@ -98,9 +119,8 @@ struct HydrologyParams {
     float meanderStrength = 0.05f;
     float deltaFormationRate = 0.003f;
 
-    // Channel initialization - NEW: initial channel depth based on flow
+    // Channel initialization
     float initialChannelFactor = 0.3f;       // Fraction of flow-based channel to create immediately
-    float minBaseflowChannel = 0.002f;       // Minimum channel for baseflow display
 
     // Continuous mode - recalculate flow network as terrain changes
     int recalculateInterval = 5;  // Recalculate full flow network every N steps
@@ -109,6 +129,31 @@ struct HydrologyParams {
     // Completion (only used if continuous = false)
     int maxIterations = 50;
     float convergenceThreshold = 0.0001f;
+
+    // Stream order (Strahler) - for realistic drainage hierarchy
+    float firstOrderThreshold = 0.0005f;   // Min flow fraction for order-1 stream
+    int maxStreamOrder = 7;                // Cap stream order display
+    // Width scaling by stream order (order 0-7)
+    float orderWidthScale[8] = {0.3f, 0.5f, 0.8f, 1.2f, 2.0f, 3.5f, 5.0f, 8.0f};
+
+    // Rivulets - fine detail streams from rainfall
+    float rivuletThreshold = 0.0001f;      // Very low threshold for tiny streams
+    float rivuletDepthScale = 0.002f;      // Base depth for rivulets
+    bool showRivulets = true;              // Enable fine detail streams
+
+    // Stream power erosion - valley carving
+    float streamPowerErosionCoeff = 0.001f;    // Erosion rate coefficient
+    float maxChannelErosionPerStep = 0.005f;   // Max erosion per step
+    float lateralErosionFactor = 0.3f;         // Lateral erosion for valley widening
+
+    // Sediment transport - capacity-based
+    float sedimentCapacityCoeff = 0.5f;    // Transport capacity coefficient
+    float sedimentErodeRate = 0.1f;        // Rate of sediment pickup
+    float sedimentDepositRate = 0.2f;      // Rate of sediment deposition
+
+    // Spring channel visibility
+    float springChannelDepth = 0.002f;     // Channel depth from springs
+    float springWaterVisibility = 0.1f;    // Water visibility at springs
 };
 
 // Configuration for glacier system
@@ -150,9 +195,20 @@ struct HydrologyState {
     std::unique_ptr<Heightmap> snowpack;
     std::unique_ptr<Heightmap> meltwater;
 
-    // Groundwater system - stores infiltrated water that sustains rivers
-    std::unique_ptr<Heightmap> groundwater;  // Aquifer storage
-    std::unique_ptr<Heightmap> baseflow;     // Discharge rate to surface
+    // Water particle system - tracks water amount and age for lifetime/evaporation
+    std::unique_ptr<Heightmap> waterAmount;   // Current water volume at each cell
+    std::unique_ptr<Heightmap> waterAge;      // Age of water (for lifetime decay)
+
+    // Rain shadow - moisture availability factor (0-1)
+    std::unique_ptr<Heightmap> moistureFactor;
+
+    // Stream order (Strahler) - for realistic drainage hierarchy
+    std::unique_ptr<Heightmap> streamOrder;   // Strahler order (1-7+)
+    std::unique_ptr<Heightmap> streamPower;   // Stream power index for erosion
+
+    // Spring network - persistent spring locations
+    std::vector<SpringLocation> springs;
+    bool springsInitialized = false;
 
     Season currentSeason = Season::Spring;
     float seasonProgress = 0.0f;
@@ -167,8 +223,11 @@ struct HydrologyState {
         state.iceThickness = std::make_unique<Heightmap>(width, height);
         state.snowpack = std::make_unique<Heightmap>(width, height);
         state.meltwater = std::make_unique<Heightmap>(width, height);
-        state.groundwater = std::make_unique<Heightmap>(width, height);
-        state.baseflow = std::make_unique<Heightmap>(width, height);
+        state.waterAmount = std::make_unique<Heightmap>(width, height);
+        state.waterAge = std::make_unique<Heightmap>(width, height);
+        state.moistureFactor = std::make_unique<Heightmap>(width, height);
+        state.streamOrder = std::make_unique<Heightmap>(width, height);
+        state.streamPower = std::make_unique<Heightmap>(width, height);
         return state;
     }
 };

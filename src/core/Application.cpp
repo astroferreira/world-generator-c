@@ -1,5 +1,6 @@
 #include "core/Application.hpp"
 #include "io/ImageExporter.hpp"
+#include "utils/Profiler.hpp"
 #include <iostream>
 #include <sstream>
 
@@ -214,6 +215,7 @@ void Application::handleKeyDown(SDL_Keycode key) {
     switch (key) {
         case SDLK_ESCAPE:
         case SDLK_q:
+            Profiler::instance().report();
             m_running = false;
             break;
         case SDLK_SPACE:

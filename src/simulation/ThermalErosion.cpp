@@ -1,4 +1,5 @@
 #include "simulation/ThermalErosion.hpp"
+#include "utils/Profiler.hpp"
 #include <algorithm>
 
 #ifdef WORLDGEN_USE_OPENMP
@@ -33,6 +34,7 @@ void ThermalErosion::initialize(TerrainData& terrain) {
 }
 
 void ThermalErosion::step() {
+    PROFILE_SCOPE("ThermalErosion::step");
     if (!m_terrain) return;
 
     const size_t w = m_terrain->width();
@@ -48,6 +50,7 @@ void ThermalErosion::step() {
     const int neighborOffset = m_params.use8Neighbors ? 0 : 1;
     const float talusAngle = m_params.talusAngle;
     const float erosionRate = m_params.erosionRate;
+    const int maxTransferNeighbors = m_params.maxTransferNeighbors;
 
     int changes = 0;
     float* heightData = m_terrain->height->data();
@@ -66,33 +69,20 @@ void ThermalErosion::step() {
         int tid = omp_get_thread_num();
         float* localDelta = m_threadLocalDeltas[tid].data();
 
+        // Thread-local storage for top N steepest neighbors (indices and data)
+        size_t topIndices[8];
+        float topSlopes[8];
+        float topHeightDiffs[8];
+
         #pragma omp for schedule(static)
         for (size_t y = 1; y < h - 1; ++y) {
             for (size_t x = 1; x < w - 1; ++x) {
                 const size_t idx = y * w + x;
                 const float centerHeight = heightData[idx];
 
-                float totalExcess = 0.0f;
                 int unstableCount = 0;
 
-                // First pass: calculate total excess slope
-                for (int i = neighborOffset; i < neighborCount; ++i) {
-                    const int nx = static_cast<int>(x) + dx[i];
-                    const int ny = static_cast<int>(y) + dy[i];
-                    const float neighborHeight = heightData[ny * w + nx];
-                    const float heightDiff = centerHeight - neighborHeight;
-                    const float slope = heightDiff / dist[i];
-
-                    if (slope > talusAngle) {
-                        totalExcess += slope - talusAngle;
-                        ++unstableCount;
-                    }
-                }
-
-                if (unstableCount == 0) continue;
-                ++changes;
-
-                // Second pass: distribute material to thread-local buffer
+                // Single pass: collect unstable neighbors
                 for (int i = neighborOffset; i < neighborCount; ++i) {
                     const int nx = static_cast<int>(x) + dx[i];
                     const int ny = static_cast<int>(y) + dy[i];
@@ -102,13 +92,49 @@ void ThermalErosion::step() {
                     const float slope = heightDiff / dist[i];
 
                     if (slope > talusAngle) {
-                        const float excessSlope = slope - talusAngle;
-                        const float proportion = excessSlope / totalExcess;
-                        const float transfer = heightDiff * 0.5f * proportion * erosionRate;
-
-                        localDelta[idx] -= transfer;
-                        localDelta[nidx] += transfer;
+                        topIndices[unstableCount] = nidx;
+                        topSlopes[unstableCount] = slope;
+                        topHeightDiffs[unstableCount] = heightDiff;
+                        ++unstableCount;
                     }
+                }
+
+                if (unstableCount == 0) continue;
+                ++changes;
+
+                // Find top N steepest using partial selection (O(n*k) but k is small)
+                int transferCount = std::min(unstableCount, maxTransferNeighbors);
+
+                // Simple selection: for each position, find the max remaining
+                for (int k = 0; k < transferCount; ++k) {
+                    int maxIdx = k;
+                    for (int j = k + 1; j < unstableCount; ++j) {
+                        if (topSlopes[j] > topSlopes[maxIdx]) {
+                            maxIdx = j;
+                        }
+                    }
+                    // Swap to position k
+                    if (maxIdx != k) {
+                        std::swap(topIndices[k], topIndices[maxIdx]);
+                        std::swap(topSlopes[k], topSlopes[maxIdx]);
+                        std::swap(topHeightDiffs[k], topHeightDiffs[maxIdx]);
+                    }
+                }
+
+                // Calculate total excess for top neighbors only
+                float totalExcess = 0.0f;
+                for (int i = 0; i < transferCount; ++i) {
+                    totalExcess += topSlopes[i] - talusAngle;
+                }
+
+                // Distribute material to steepest neighbors only
+                for (int i = 0; i < transferCount; ++i) {
+                    const float excessSlope = topSlopes[i] - talusAngle;
+                    const float proportion = excessSlope / totalExcess;
+                    const float transfer = topHeightDiffs[i] * 0.5f * proportion * erosionRate;
+
+                    localDelta[idx] -= transfer;
+                    localDelta[topIndices[i]] += transfer;
                 }
             }
         }
@@ -129,30 +155,19 @@ void ThermalErosion::step() {
     // Sequential version
     std::fill(m_deltaBuffer.begin(), m_deltaBuffer.end(), 0.0f);
 
+    // Storage for top N steepest neighbors
+    size_t topIndices[8];
+    float topSlopes[8];
+    float topHeightDiffs[8];
+
     for (size_t y = 1; y < h - 1; ++y) {
         for (size_t x = 1; x < w - 1; ++x) {
             const size_t idx = y * w + x;
             const float centerHeight = heightData[idx];
 
-            float totalExcess = 0.0f;
             int unstableCount = 0;
 
-            for (int i = neighborOffset; i < neighborCount; ++i) {
-                const int nx = static_cast<int>(x) + dx[i];
-                const int ny = static_cast<int>(y) + dy[i];
-                const float neighborHeight = heightData[ny * w + nx];
-                const float heightDiff = centerHeight - neighborHeight;
-                const float slope = heightDiff / dist[i];
-
-                if (slope > talusAngle) {
-                    totalExcess += slope - talusAngle;
-                    ++unstableCount;
-                }
-            }
-
-            if (unstableCount == 0) continue;
-            ++changes;
-
+            // Single pass: collect unstable neighbors
             for (int i = neighborOffset; i < neighborCount; ++i) {
                 const int nx = static_cast<int>(x) + dx[i];
                 const int ny = static_cast<int>(y) + dy[i];
@@ -162,13 +177,47 @@ void ThermalErosion::step() {
                 const float slope = heightDiff / dist[i];
 
                 if (slope > talusAngle) {
-                    const float excessSlope = slope - talusAngle;
-                    const float proportion = excessSlope / totalExcess;
-                    const float transfer = heightDiff * 0.5f * proportion * erosionRate;
-
-                    m_deltaBuffer[idx] -= transfer;
-                    m_deltaBuffer[nidx] += transfer;
+                    topIndices[unstableCount] = nidx;
+                    topSlopes[unstableCount] = slope;
+                    topHeightDiffs[unstableCount] = heightDiff;
+                    ++unstableCount;
                 }
+            }
+
+            if (unstableCount == 0) continue;
+            ++changes;
+
+            // Find top N steepest using partial selection
+            int transferCount = std::min(unstableCount, maxTransferNeighbors);
+
+            for (int k = 0; k < transferCount; ++k) {
+                int maxIdx = k;
+                for (int j = k + 1; j < unstableCount; ++j) {
+                    if (topSlopes[j] > topSlopes[maxIdx]) {
+                        maxIdx = j;
+                    }
+                }
+                if (maxIdx != k) {
+                    std::swap(topIndices[k], topIndices[maxIdx]);
+                    std::swap(topSlopes[k], topSlopes[maxIdx]);
+                    std::swap(topHeightDiffs[k], topHeightDiffs[maxIdx]);
+                }
+            }
+
+            // Calculate total excess for top neighbors only
+            float totalExcess = 0.0f;
+            for (int i = 0; i < transferCount; ++i) {
+                totalExcess += topSlopes[i] - talusAngle;
+            }
+
+            // Distribute material to steepest neighbors only
+            for (int i = 0; i < transferCount; ++i) {
+                const float excessSlope = topSlopes[i] - talusAngle;
+                const float proportion = excessSlope / totalExcess;
+                const float transfer = topHeightDiffs[i] * 0.5f * proportion * erosionRate;
+
+                m_deltaBuffer[idx] -= transfer;
+                m_deltaBuffer[topIndices[i]] += transfer;
             }
         }
     }

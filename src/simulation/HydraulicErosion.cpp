@@ -1,4 +1,5 @@
 #include "simulation/HydraulicErosion.hpp"
+#include "utils/Profiler.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -22,6 +23,7 @@ void HydraulicErosion::initialize(TerrainData& terrain) {
 }
 
 void HydraulicErosion::step() {
+    PROFILE_SCOPE("HydraulicErosion::step");
     if (!m_terrain) return;
 
     const int chunksPerSide = m_params.parallelChunks;
@@ -270,16 +272,30 @@ void HydraulicErosion::simulateDroplet(Random& rng, int chunkX, int chunkY, int 
 
             sediment -= amountToDeposit;
 
-            // Deposit using bilinear interpolation
+            // Concentrated deposition to reduce ridge artifacts
+            // depositConcentration controls how much goes to single nearest cell vs bilinear spread
+            const float concentration = m_params.depositConcentration;
+
+            // Find nearest cell based on offset
+            int nearestOffsetX = (cellOffsetX < 0.5f) ? 0 : 1;
+            int nearestOffsetY = (cellOffsetY < 0.5f) ? 0 : 1;
+            int nearestIdx = (nodeY + nearestOffsetY) * w + (nodeX + nearestOffsetX);
+
+            // Concentrated portion goes to single nearest cell
+            float concentratedAmount = amountToDeposit * concentration;
+            heightData[nearestIdx] += concentratedAmount;
+
+            // Remaining portion spread using bilinear interpolation
+            float spreadAmount = amountToDeposit * (1.0f - concentration);
             float w00 = (1.0f - cellOffsetX) * (1.0f - cellOffsetY);
             float w10 = cellOffsetX * (1.0f - cellOffsetY);
             float w01 = (1.0f - cellOffsetX) * cellOffsetY;
             float w11 = cellOffsetX * cellOffsetY;
 
-            heightData[nodeY * w + nodeX] += amountToDeposit * w00;
-            heightData[nodeY * w + nodeX + 1] += amountToDeposit * w10;
-            heightData[(nodeY + 1) * w + nodeX] += amountToDeposit * w01;
-            heightData[(nodeY + 1) * w + nodeX + 1] += amountToDeposit * w11;
+            heightData[nodeY * w + nodeX] += spreadAmount * w00;
+            heightData[nodeY * w + nodeX + 1] += spreadAmount * w10;
+            heightData[(nodeY + 1) * w + nodeX] += spreadAmount * w01;
+            heightData[(nodeY + 1) * w + nodeX + 1] += spreadAmount * w11;
         } else {
             // Erode terrain
             float amountToErode = std::min((capacity - sediment) * erodeSpeed, -deltaHeight);

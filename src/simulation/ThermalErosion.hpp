@@ -9,6 +9,7 @@ struct ThermalParams {
     float talusAngle = 0.5f;
     float erosionRate = 0.5f;
     bool use8Neighbors = true;
+    int maxTransferNeighbors = 2;  // Limit transfer to N steepest neighbors (reduces plateau formation)
 };
 
 class ThermalErosion : public ISimulation {

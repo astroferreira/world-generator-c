@@ -8,6 +8,7 @@
 #include "simulation/HydraulicErosion.hpp"
 #include "analysis/RiverMapper.hpp"
 #include "renderer/ColorMapper.hpp"
+#include "utils/Profiler.hpp"
 #include "stb/stb_image_write.h"
 #include <iostream>
 #include <string>
@@ -162,6 +163,10 @@ int runHeadless(int steps, int exportInterval, int seed, int size) {
     exportHeightmapToPNG(*finalLakeMap, "lake_map_2d.png");
     exportHeightmapToPNG(*finalWaterMap, "water_map_2d.png");
     std::cout << "Exported: river_map_2d.png, lake_map_2d.png, water_map_2d.png" << std::endl;
+
+    // Print profiling report
+    std::cout << std::endl;
+    worldgen::Profiler::instance().report();
 
     return 0;
 }

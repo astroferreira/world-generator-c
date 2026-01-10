@@ -25,6 +25,9 @@ struct HydraulicParams {
     float initialSpeed = 1.0f;
     int parallelChunks = 4;  // Grid partitioning for parallel simulation
 
+    // Deposition control - reduces ridge artifacts
+    float depositConcentration = 0.7f;  // 0=full bilinear spread, 1=single cell
+
     // Termination conditions - droplets end at water bodies
     float seaLevel = 0.32f;         // Droplets stop when reaching sea level
     float minWaterForTermination = 0.01f;  // Minimum water depth to consider as lake
