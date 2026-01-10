@@ -704,10 +704,6 @@ void HydrologySimulation::updateGroundwater() {
             size_t idx = y * w + x;
 
             // Infiltration: rainfall that soaks into ground
-            // More infiltration in areas with higher flow (more rainfall upstream)
-            float localFlow = flowAcc.get(x, y);
-            float flowRatio = localFlow / maxFlow;
-
             // Infiltration proportional to local precipitation/runoff
             // Higher terrain = more rainfall = more infiltration potential
             float elev = heightData[idx];
